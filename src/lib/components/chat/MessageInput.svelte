@@ -102,6 +102,7 @@
 	);
 
 	const scrollToBottom = () => {
+		// 滚动到消息容器的底部
 		const element = document.getElementById('messages-container');
 		element.scrollTo({
 			top: element.scrollHeight,
@@ -110,6 +111,7 @@
 	};
 
 	const screenCaptureHandler = async () => {
+		// 处理屏幕截图
 		try {
 			// Request screen media
 			const mediaStream = await navigator.mediaDevices.getDisplayMedia({
@@ -147,6 +149,7 @@
 	};
 
 	const uploadFileHandler = async (file, fullContext: boolean = false) => {
+		// 处理文件上传
 		if ($_user?.role !== 'admin' && !($_user?.permissions?.chat?.file_upload ?? true)) {
 			toast.error($i18n.t('You do not have permission to upload files.'));
 			return null;
@@ -224,6 +227,7 @@
 	};
 
 	const inputFilesHandler = async (inputFiles) => {
+		// 处理输入文件
 		console.log('Input files handler called with:', inputFiles);
 		inputFiles.forEach((file) => {
 			console.log('Processing file:', {
@@ -285,6 +289,7 @@
 	};
 
 	const handleKeyDown = (event: KeyboardEvent) => {
+		// 处理键盘按下事件
 		if (event.key === 'Escape') {
 			console.log('Escape');
 			dragged = false;
@@ -292,6 +297,7 @@
 	};
 
 	const onDragOver = (e) => {
+		// 处理拖动文件悬停事件
 		e.preventDefault();
 
 		// Check if a file is being dragged.
@@ -303,10 +309,12 @@
 	};
 
 	const onDragLeave = () => {
+		// 处理拖动文件离开事件
 		dragged = false;
 	};
 
 	const onDrop = async (e) => {
+		// 处理文件拖放事件
 		e.preventDefault();
 		console.log(e);
 
@@ -322,6 +330,7 @@
 	};
 
 	onMount(async () => {
+		// 组件挂载时的初始化操作
 		loaded = true;
 
 		window.setTimeout(() => {
@@ -341,6 +350,7 @@
 	});
 
 	onDestroy(() => {
+		// 组件销毁时的清理操作
 		console.log('destroy');
 		window.removeEventListener('keydown', handleKeyDown);
 

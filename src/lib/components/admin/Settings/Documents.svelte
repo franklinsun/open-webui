@@ -72,6 +72,11 @@
 		hybrid: false
 	};
 
+	let useGlobalRAG = false;
+	let milvusUri = '';
+	let collectionName = '';
+	let embeddingModelId = '';
+
 	const embeddingModelUpdateHandler = async () => {
 		if (embeddingEngine === '' && embeddingModel.split('/').length - 1 > 1) {
 			toast.error(
@@ -165,8 +170,30 @@
 		}
 	};
 
+	const updateComponentPropertiesHandler = async () => {
+		const res = await updateRAGConfig(localStorage.token, {
+			use_global_rag: useGlobalRAG,
+			milvus_uri: milvusUri,
+			collection_name: collectionName,
+			embedding_model_id: embeddingModelId
+		}).catch(async (error) => {
+			toast.error(`${error}`);
+			return null;
+		});
+
+		if (res) {
+			console.log('updateComponentPropertiesHandler:', res);
+			if (res.status === true) {
+				toast.success($i18n.t('Component properties updated successfully'), {
+					duration: 1000 * 10
+				});
+			}
+		}
+	};
+
 	const submitHandler = async () => {
 		await embeddingModelUpdateHandler();
+		await updateComponentPropertiesHandler();
 
 		if (querySettings.hybrid) {
 			await rerankingModelUpdateHandler();
@@ -192,7 +219,11 @@
 			content_extraction: {
 				engine: contentExtractionEngine,
 				tika_server_url: tikaServerUrl
-			}
+			},
+			use_global_rag: useGlobalRAG,
+			milvus_uri: milvusUri,
+			collection_name: collectionName,
+			embedding_model_id: embeddingModelId
 		});
 
 		await updateQuerySettings(localStorage.token, querySettings);
@@ -254,6 +285,11 @@
 			fileMaxCount = res?.file.max_count ?? '';
 
 			enableGoogleDriveIntegration = res.enable_google_drive_integration;
+
+			useGlobalRAG = res.use_global_rag;
+			milvusUri = res.milvus_uri;
+			collectionName = res.collection_name;
+			embeddingModelId = res.embedding_model_id;
 		}
 	});
 </script>
@@ -293,6 +329,46 @@
 	}}
 >
 	<div class=" space-y-2.5 overflow-y-scroll scrollbar-hidden h-full pr-1.5">
+		<div class="text-sm font-medium mb-1">{$i18n.t('Global RAG Expert Library')}</div>
+
+		<div class="flex justify-between items-center text-xs">
+			<div class="text-xs font-medium">{$i18n.t('Use Global RAG Expert Library')}</div>
+			<div>
+				<Switch bind:state={useGlobalRAG} />
+			</div>
+		</div>
+
+		{#if useGlobalRAG}
+			<div class="mt-2">
+				<div class="mb-1 text-xs font-medium">{$i18n.t('Milvus URI')}</div>
+				<input
+					class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+					placeholder={$i18n.t('Enter Milvus URI')}
+					bind:value={milvusUri}
+				/>
+			</div>
+
+			<div class="mt-2">
+				<div class="mb-1 text-xs font-medium">{$i18n.t('Collection Name')}</div>
+				<input
+					class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+					placeholder={$i18n.t('Enter Collection Name')}
+					bind:value={collectionName}
+				/>
+			</div>
+
+			<div class="mt-2">
+				<div class="mb-1 text-xs font-medium">{$i18n.t('Embedding Model ID')}</div>
+				<input
+					class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+					placeholder={$i18n.t('Enter Embedding Model ID')}
+					bind:value={embeddingModelId}
+				/>
+			</div>
+		{/if}
+
+		<hr class=" border-gray-100 dark:border-gray-850" />
+
 		<div class="flex flex-col gap-0.5">
 			<div class=" mb-0.5 text-sm font-medium">{$i18n.t('General Settings')}</div>
 

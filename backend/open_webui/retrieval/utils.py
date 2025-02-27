@@ -1,28 +1,23 @@
+import asyncio
 import logging
 import os
 import uuid
 from typing import Optional, Union
 
-import asyncio
 import requests
-
 from huggingface_hub import snapshot_download
 from langchain.retrievers import ContextualCompressionRetriever, EnsembleRetriever
 from langchain_community.retrievers import BM25Retriever
 from langchain_core.documents import Document
-
-
 from open_webui.config import VECTOR_DB
-from open_webui.retrieval.vector.connector import VECTOR_DB_CLIENT
-from open_webui.utils.misc import get_last_user_message, calculate_sha256_string
-
-from open_webui.models.users import UserModel
-
 from open_webui.env import (
-    SRC_LOG_LEVELS,
-    OFFLINE_MODE,
     ENABLE_FORWARD_USER_INFO_HEADERS,
+    OFFLINE_MODE,
+    SRC_LOG_LEVELS,
 )
+from open_webui.models.users import UserModel
+from open_webui.retrieval.vector.connector import VECTOR_DB_CLIENT
+from open_webui.utils.misc import calculate_sha256_string, get_last_user_message
 
 log = logging.getLogger(__name__)
 log.setLevel(SRC_LOG_LEVELS["RAG"])
@@ -90,7 +85,7 @@ def get_doc(collection_name: str, user: UserModel = None):
         result = VECTOR_DB_CLIENT.get(collection_name=collection_name)
 
         if result:
-            log.info(f"query_doc:result {result.ids} {result.metadatas}")
+            log.info(f"get_doc:result {result.ids} {result.metadatas}")
 
         return result
     except Exception as e:
@@ -352,7 +347,12 @@ def get_sources_from_files(
     full_context=False,
 ):
     log.debug(
-        f"files: {files} {queries} {embedding_function} {reranking_function} {full_context}"
+        "files: %s %s %s %s %s",
+        files,
+        queries,
+        embedding_function,
+        reranking_function,
+        full_context,
     )
 
     extracted_collections = []

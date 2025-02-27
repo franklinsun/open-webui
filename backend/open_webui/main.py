@@ -158,6 +158,10 @@ from open_webui.config import (
     WHISPER_MODEL_AUTO_UPDATE,
     WHISPER_MODEL_DIR,
     # Retrieval
+    USE_GLOBAL_RAG,
+    MILVUS_URI,
+    COLLECTION_NAME,
+    EMBEDDING_MODEL_ID,
     RAG_TEMPLATE,
     DEFAULT_RAG_TEMPLATE,
     RAG_FULL_CONTEXT,
@@ -518,6 +522,10 @@ app.state.FUNCTIONS = {}
 #
 ########################################
 
+app.state.config.USE_GLOBAL_RAG = USE_GLOBAL_RAG
+app.state.config.MILVUS_URI = MILVUS_URI
+app.state.config.COLLECTION_NAME = COLLECTION_NAME
+app.state.config.EMBEDDING_MODEL_ID = EMBEDDING_MODEL_ID
 
 app.state.config.TOP_K = RAG_TOP_K
 app.state.config.RELEVANCE_THRESHOLD = RAG_RELEVANCE_THRESHOLD

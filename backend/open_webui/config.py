@@ -1,9 +1,8 @@
+import base64
 import json
 import logging
 import os
 import shutil
-import base64
-
 from datetime import datetime
 from pathlib import Path
 from typing import Generic, Optional, TypeVar
@@ -11,9 +10,6 @@ from urllib.parse import urlparse
 
 import chromadb
 import requests
-from pydantic import BaseModel
-from sqlalchemy import JSON, Column, DateTime, Integer, func
-
 from open_webui.env import (
     DATA_DIR,
     DATABASE_URL,
@@ -27,6 +23,8 @@ from open_webui.env import (
     log,
 )
 from open_webui.internal.db import Base, get_db
+from pydantic import BaseModel
+from sqlalchemy import JSON, Column, DateTime, Integer, func
 
 
 class EndpointFilter(logging.Filter):
@@ -205,7 +203,11 @@ class PersistentConfig(Generic[T]):
         self.env_value = env_value
         self.config_value = get_config_value(config_path)
         if self.config_value is not None:
-            log.info(f"'{env_name}' loaded from the latest database entry")
+            log.info(
+                "'%s' loaded from the latest database entry, value: %s",
+                env_name,
+                self.config_value,
+            )
             self.value = self.config_value
         else:
             self.value = env_value
@@ -232,10 +234,9 @@ class PersistentConfig(Generic[T]):
         new_value = get_config_value(self.config_path)
         if new_value is not None:
             self.value = new_value
-            log.info(f"Updated {self.env_name} to new value {self.value}")
+            log.info("Updated %s to new value %s", self.env_name, self.value)
 
     def save(self):
-        log.info(f"Saving '{self.env_name}' to the database")
         path_parts = self.config_path.split(".")
         sub_config = CONFIG_DATA
         for key in path_parts[:-1]:
@@ -244,6 +245,7 @@ class PersistentConfig(Generic[T]):
             sub_config = sub_config[key]
         sub_config[path_parts[-1]] = self.value
         save_to_db(CONFIG_DATA)
+        log.info(f"Saving '{self.env_name}' to the database, value: {self.value}")
         self.config_value = self.value
 
 
@@ -1494,7 +1496,7 @@ Ensure that the tools are effectively utilized to achieve the highest-quality an
 # Vector Database
 ####################################
 
-VECTOR_DB = os.environ.get("VECTOR_DB", "chroma")
+VECTOR_DB = os.environ.get("VECTOR_DB", "milvus")
 
 # Chroma
 CHROMA_DATA_PATH = f"{DATA_DIR}/vector_db"
@@ -1514,12 +1516,6 @@ else:
     CHROMA_HTTP_HEADERS = None
 CHROMA_HTTP_SSL = os.environ.get("CHROMA_HTTP_SSL", "false").lower() == "true"
 # this uses the model defined in the Dockerfile ENV variable. If you dont use docker or docker based deployments such as k8s, the default embedding model will be used (sentence-transformers/all-MiniLM-L6-v2)
-
-# Milvus
-
-MILVUS_URI = os.environ.get("MILVUS_URI", f"{DATA_DIR}/vector_db/milvus.db")
-MILVUS_DB = os.environ.get("MILVUS_DB", "default")
-MILVUS_TOKEN = os.environ.get("MILVUS_TOKEN", None)
 
 # Qdrant
 QDRANT_URI = os.environ.get("QDRANT_URI", None)
@@ -1598,6 +1594,34 @@ RAG_FULL_CONTEXT = PersistentConfig(
     "RAG_FULL_CONTEXT",
     "rag.full_context",
     os.getenv("RAG_FULL_CONTEXT", "False").lower() == "true",
+)
+
+USE_GLOBAL_RAG = PersistentConfig(
+    "USE_GLOBAL_RAG",
+    "rag.use_global_rag",
+    os.environ.get("USE_GLOBAL_RAG", "False").lower() == "true",
+)
+
+# Milvus
+
+MILVUS_DB = os.environ.get("MILVUS_DB", "default")
+MILVUS_TOKEN = os.environ.get("MILVUS_TOKEN", None)
+MILVUS_URI = PersistentConfig(
+    "MILVUS_URI",
+    "rag.milvus_uri",
+    os.environ.get("MILVUS_URI", f"{DATA_DIR}/vector_db/milvus.db"),
+)
+
+COLLECTION_NAME = PersistentConfig(
+    "COLLECTION_NAME",
+    "rag.collection_name",
+    os.environ.get("COLLECTION_NAME", ""),
+)
+
+EMBEDDING_MODEL_ID = PersistentConfig(
+    "EMBEDDING_MODEL_ID",
+    "rag.embedding_model_id",
+    os.environ.get("EMBEDDING_MODEL_ID", ""),
 )
 
 RAG_FILE_MAX_COUNT = PersistentConfig(

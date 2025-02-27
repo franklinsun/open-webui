@@ -3,64 +3,44 @@ import logging
 import mimetypes
 import os
 import shutil
-
 import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Iterator, List, Optional, Sequence, Union
 
+import tiktoken
 from fastapi import (
+    APIRouter,
     Depends,
     FastAPI,
     File,
     Form,
     HTTPException,
-    UploadFile,
     Request,
+    UploadFile,
     status,
-    APIRouter,
 )
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.concurrency import run_in_threadpool
-from pydantic import BaseModel
-import tiktoken
-
-
+from fastapi.middleware.cors import CORSMiddleware
 from langchain.text_splitter import RecursiveCharacterTextSplitter, TokenTextSplitter
 from langchain_core.documents import Document
-
+from open_webui.config import (
+    DEFAULT_LOCALE,
+    ENV,
+    RAG_EMBEDDING_MODEL_AUTO_UPDATE,
+    RAG_EMBEDDING_MODEL_TRUST_REMOTE_CODE,
+    RAG_RERANKING_MODEL_AUTO_UPDATE,
+    RAG_RERANKING_MODEL_TRUST_REMOTE_CODE,
+    UPLOAD_DIR,
+)
+from open_webui.constants import ERROR_MESSAGES
+from open_webui.env import DEVICE_TYPE, DOCKER, SRC_LOG_LEVELS
 from open_webui.models.files import FileModel, Files
 from open_webui.models.knowledge import Knowledges
-from open_webui.storage.provider import Storage
-
-
-from open_webui.retrieval.vector.connector import VECTOR_DB_CLIENT
 
 # Document loaders
 from open_webui.retrieval.loaders.main import Loader
 from open_webui.retrieval.loaders.youtube import YoutubeLoader
-
-# Web search engines
-from open_webui.retrieval.web.main import SearchResult
-from open_webui.retrieval.web.utils import get_web_loader
-from open_webui.retrieval.web.brave import search_brave
-from open_webui.retrieval.web.kagi import search_kagi
-from open_webui.retrieval.web.mojeek import search_mojeek
-from open_webui.retrieval.web.bocha import search_bocha
-from open_webui.retrieval.web.duckduckgo import search_duckduckgo
-from open_webui.retrieval.web.google_pse import search_google_pse
-from open_webui.retrieval.web.jina_search import search_jina
-from open_webui.retrieval.web.searchapi import search_searchapi
-from open_webui.retrieval.web.serpapi import search_serpapi
-from open_webui.retrieval.web.searxng import search_searxng
-from open_webui.retrieval.web.serper import search_serper
-from open_webui.retrieval.web.serply import search_serply
-from open_webui.retrieval.web.serpstack import search_serpstack
-from open_webui.retrieval.web.tavily import search_tavily
-from open_webui.retrieval.web.bing import search_bing
-from open_webui.retrieval.web.exa import search_exa
-
-
 from open_webui.retrieval.utils import (
     get_embedding_function,
     get_model_path,
@@ -69,27 +49,31 @@ from open_webui.retrieval.utils import (
     query_doc,
     query_doc_with_hybrid_search,
 )
-from open_webui.utils.misc import (
-    calculate_sha256_string,
-)
+from open_webui.retrieval.vector.connector import VECTOR_DB_CLIENT
+from open_webui.retrieval.web.bing import search_bing
+from open_webui.retrieval.web.bocha import search_bocha
+from open_webui.retrieval.web.brave import search_brave
+from open_webui.retrieval.web.duckduckgo import search_duckduckgo
+from open_webui.retrieval.web.exa import search_exa
+from open_webui.retrieval.web.google_pse import search_google_pse
+from open_webui.retrieval.web.jina_search import search_jina
+from open_webui.retrieval.web.kagi import search_kagi
+
+# Web search engines
+from open_webui.retrieval.web.main import SearchResult
+from open_webui.retrieval.web.mojeek import search_mojeek
+from open_webui.retrieval.web.searchapi import search_searchapi
+from open_webui.retrieval.web.searxng import search_searxng
+from open_webui.retrieval.web.serpapi import search_serpapi
+from open_webui.retrieval.web.serper import search_serper
+from open_webui.retrieval.web.serply import search_serply
+from open_webui.retrieval.web.serpstack import search_serpstack
+from open_webui.retrieval.web.tavily import search_tavily
+from open_webui.retrieval.web.utils import get_web_loader
+from open_webui.storage.provider import Storage
 from open_webui.utils.auth import get_admin_user, get_verified_user
-
-
-from open_webui.config import (
-    ENV,
-    RAG_EMBEDDING_MODEL_AUTO_UPDATE,
-    RAG_EMBEDDING_MODEL_TRUST_REMOTE_CODE,
-    RAG_RERANKING_MODEL_AUTO_UPDATE,
-    RAG_RERANKING_MODEL_TRUST_REMOTE_CODE,
-    UPLOAD_DIR,
-    DEFAULT_LOCALE,
-)
-from open_webui.env import (
-    SRC_LOG_LEVELS,
-    DEVICE_TYPE,
-    DOCKER,
-)
-from open_webui.constants import ERROR_MESSAGES
+from open_webui.utils.misc import calculate_sha256_string
+from pydantic import BaseModel
 
 log = logging.getLogger(__name__)
 log.setLevel(SRC_LOG_LEVELS["RAG"])
@@ -350,6 +334,10 @@ async def update_reranking_config(
 async def get_rag_config(request: Request, user=Depends(get_admin_user)):
     return {
         "status": True,
+        "use_global_rag": request.app.state.config.USE_GLOBAL_RAG,
+        "milvus_uri": request.app.state.config.MILVUS_URI,
+        "collection_name": request.app.state.config.COLLECTION_NAME,
+        "embedding_model_id": request.app.state.config.EMBEDDING_MODEL_ID,
         "pdf_extract_images": request.app.state.config.PDF_EXTRACT_IMAGES,
         "RAG_FULL_CONTEXT": request.app.state.config.RAG_FULL_CONTEXT,
         "enable_google_drive_integration": request.app.state.config.ENABLE_GOOGLE_DRIVE_INTEGRATION,
@@ -472,6 +460,10 @@ class ConfigUpdateForm(BaseModel):
     chunk: Optional[ChunkParamUpdateForm] = None
     youtube: Optional[YoutubeLoaderConfig] = None
     web: Optional[WebConfig] = None
+    use_global_rag: Optional[bool] = None
+    milvus_uri: Optional[str] = None
+    collection_name: Optional[str] = None
+    embedding_model_id: Optional[str] = None
 
 
 @router.post("/config/update")
@@ -593,6 +585,30 @@ async def update_rag_config(
             form_data.web.search.domain_filter_list
         )
 
+    request.app.state.config.USE_GLOBAL_RAG = (
+        form_data.use_global_rag
+        if form_data.use_global_rag is not None
+        else request.app.state.config.USE_GLOBAL_RAG
+    )
+
+    request.app.state.config.MILVUS_URI = (
+        form_data.milvus_uri
+        if form_data.milvus_uri is not None
+        else request.app.state.config.MILVUS_URI
+    )
+
+    request.app.state.config.COLLECTION_NAME = (
+        form_data.collection_name
+        if form_data.collection_name is not None
+        else request.app.state.config.COLLECTION_NAME
+    )
+
+    request.app.state.config.EMBEDDING_MODEL_ID = (
+        form_data.embedding_model_id
+        if form_data.embedding_model_id is not None
+        else request.app.state.config.EMBEDDING_MODEL_ID
+    )
+
     return {
         "status": True,
         "pdf_extract_images": request.app.state.config.PDF_EXTRACT_IMAGES,
@@ -647,6 +663,10 @@ async def update_rag_config(
                 "domain_filter_list": request.app.state.config.RAG_WEB_SEARCH_DOMAIN_FILTER_LIST,
             },
         },
+        "use_global_rag": request.app.state.config.USE_GLOBAL_RAG,
+        "milvus_uri": request.app.state.config.MILVUS_URI,
+        "collection_name": request.app.state.config.COLLECTION_NAME,
+        "embedding_model_id": request.app.state.config.EMBEDDING_MODEL_ID,
     }
 
 

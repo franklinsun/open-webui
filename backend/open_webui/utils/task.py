@@ -1,16 +1,13 @@
 import logging
 import math
 import re
+import uuid
 from datetime import datetime
 from typing import Optional
-import uuid
 
-
-from open_webui.utils.misc import get_last_user_message, get_messages_content
-
-from open_webui.env import SRC_LOG_LEVELS
 from open_webui.config import DEFAULT_RAG_TEMPLATE
-
+from open_webui.env import SRC_LOG_LEVELS
+from open_webui.utils.misc import get_last_user_message, get_messages_content
 
 log = logging.getLogger(__name__)
 log.setLevel(SRC_LOG_LEVELS["RAG"])
@@ -149,6 +146,7 @@ def replace_messages_variable(
 
 
 def rag_template(template: str, context: str, query: str):
+    log.info(f"RAG template: {template}, context: {context}, query: {query}")
     if template.strip() == "":
         template = DEFAULT_RAG_TEMPLATE
 
@@ -182,7 +180,7 @@ def rag_template(template: str, context: str, query: str):
 
     for query_placeholder in query_placeholders:
         template = template.replace(query_placeholder, query)
-
+    log.info(f"RAG template: {template}")
     return template
 
 

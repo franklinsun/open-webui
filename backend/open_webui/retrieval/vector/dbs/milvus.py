@@ -1,24 +1,21 @@
-from pymilvus import MilvusClient as Client
-from pymilvus import FieldSchema, DataType
 import json
-
 from typing import Optional
 
-from open_webui.retrieval.vector.main import VectorItem, SearchResult, GetResult
-from open_webui.config import (
-    MILVUS_URI,
-    MILVUS_DB,
-    MILVUS_TOKEN,
-)
+from open_webui.config import MILVUS_DB, MILVUS_TOKEN, MILVUS_URI
+from open_webui.retrieval.vector.main import GetResult, SearchResult, VectorItem
+from pymilvus import DataType, FieldSchema
+from pymilvus import MilvusClient as Client
 
 
 class MilvusClient:
     def __init__(self):
         self.collection_prefix = "open_webui"
         if MILVUS_TOKEN is None:
-            self.client = Client(uri=MILVUS_URI, database=MILVUS_DB)
+            self.client = Client(uri=str(MILVUS_URI), database=MILVUS_DB)
         else:
-            self.client = Client(uri=MILVUS_URI, database=MILVUS_DB, token=MILVUS_TOKEN)
+            self.client = Client(
+                uri=str(MILVUS_URI), database=MILVUS_DB, token=MILVUS_TOKEN
+            )
 
     def _result_to_get_result(self, result) -> GetResult:
         ids = []
