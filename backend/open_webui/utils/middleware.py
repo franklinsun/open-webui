@@ -32,7 +32,10 @@ from open_webui.models.chats import Chats
 from open_webui.models.functions import Functions
 from open_webui.models.models import Models
 from open_webui.models.users import UserModel, Users
-from open_webui.retrieval.utils import get_sources_from_files
+from open_webui.retrieval.utils import (
+    get_sources_from_files,
+    get_sources_from_global_rag,
+)
 from open_webui.routers.images import GenerateImageForm, image_generations
 from open_webui.routers.pipelines import (
     process_pipeline_inlet_filter,
@@ -152,7 +155,7 @@ async def chat_completion_tools_handler(
         try:
             content = content[content.find("{") : content.rfind("}") + 1]
             if not content:
-                raise Exception("No JSON object found in the response")
+                raise ValueError("No JSON object found in the response")
 
             result = json.loads(content)
 
@@ -276,11 +279,14 @@ async def chat_web_search_handler(
             bracket_end = response.rfind("}") + 1
 
             if bracket_start == -1 or bracket_end == -1:
-                raise Exception("No JSON object found in the response")
+                raise ValueError("No JSON object found in the response")
 
             response = response[bracket_start:bracket_end]
             queries = json.loads(response)
-            queries = queries.get("queries", [])
+            if isinstance(queries, dict):
+                queries = queries.get("queries", [])
+            else:
+                queries = []
         except Exception as e:
             queries = [response]
 
@@ -434,7 +440,7 @@ async def chat_image_generation_handler(
                 bracket_end = response.rfind("}") + 1
 
                 if bracket_start == -1 or bracket_end == -1:
-                    raise Exception("No JSON object found in the response")
+                    raise ValueError("No JSON object found in the response")
 
                 response = response[bracket_start:bracket_end]
                 response = json.loads(response)
@@ -497,40 +503,39 @@ async def chat_completion_files_handler(
     request: Request, body: dict, user: UserModel
 ) -> tuple[dict, dict[str, list]]:
     sources = []
+    queries = []
+    try:
+        queries_response = await generate_queries(
+            request,
+            {
+                "model": body["model"],
+                "messages": body["messages"],
+                "type": "retrieval",
+            },
+            user,
+        )
+        queries_response = queries_response["choices"][0]["message"]["content"]
+
+        try:
+            bracket_start = queries_response.find("{")
+            bracket_end = queries_response.rfind("}") + 1
+
+            if bracket_start == -1 or bracket_end == -1:
+                raise ValueError("No JSON object found in the response")
+
+            queries_response = queries_response[bracket_start:bracket_end]
+            queries_response = json.loads(queries_response)
+        except Exception as e:
+            queries_response = {"queries": [queries_response]}
+
+        queries = queries_response.get("queries", [])
+    except Exception:
+        pass
+
+    if len(queries) == 0:
+        queries = [get_last_user_message(body["messages"])]
 
     if files := body.get("metadata", {}).get("files", None):
-        queries = []
-        try:
-            queries_response = await generate_queries(
-                request,
-                {
-                    "model": body["model"],
-                    "messages": body["messages"],
-                    "type": "retrieval",
-                },
-                user,
-            )
-            queries_response = queries_response["choices"][0]["message"]["content"]
-
-            try:
-                bracket_start = queries_response.find("{")
-                bracket_end = queries_response.rfind("}") + 1
-
-                if bracket_start == -1 or bracket_end == -1:
-                    raise Exception("No JSON object found in the response")
-
-                queries_response = queries_response[bracket_start:bracket_end]
-                queries_response = json.loads(queries_response)
-            except Exception as e:
-                queries_response = {"queries": [queries_response]}
-
-            queries = queries_response.get("queries", [])
-        except:
-            pass
-
-        if len(queries) == 0:
-            queries = [get_last_user_message(body["messages"])]
-
         try:
             # Offload get_sources_from_files to a separate thread
             loop = asyncio.get_running_loop()
@@ -554,7 +559,26 @@ async def chat_completion_files_handler(
         except Exception as e:
             log.exception(e)
 
-        log.debug(f"rag_contexts:sources: {sources}")
+    if request.app.state.config.USE_GLOBAL_RAG:
+        collection_names = [
+            name.strip() for name in request.app.state.config.COLLECTION_NAME.split(",")
+        ]
+        sources.extend(
+            get_sources_from_global_rag(
+                collection_names=collection_names,
+                queries=queries,
+                embedding_function=lambda query: request.app.state.EMBEDDING_FUNCTION(
+                    query, user=user
+                ),
+                k=request.app.state.config.TOP_K,
+                reranking_function=request.app.state.rf,
+                r=request.app.state.config.RELEVANCE_THRESHOLD,
+                hybrid_search=request.app.state.config.ENABLE_RAG_HYBRID_SEARCH,
+                full_context=request.app.state.config.RAG_FULL_CONTEXT,
+            )
+        )
+
+    log.debug("rag_contexts:sources: %s", sources)
 
     return body, {"sources": sources}
 
@@ -597,7 +621,7 @@ def apply_params_to_form_data(form_data, model):
 async def process_chat_payload(request, form_data, metadata, user, model):
 
     form_data = apply_params_to_form_data(form_data, model)
-    log.info(
+    log.debug(
         "form_data: %s, metadata: %s, user: %s, model: %s",
         form_data,
         metadata,
@@ -782,7 +806,9 @@ async def process_chat_payload(request, form_data, metadata, user, model):
         log.exception(e)
 
     # If context is not empty, insert it into the messages
+
     if len(sources) > 0:
+        log.info("sources: %s", sources)
         context_string = ""
         for source_idx, source in enumerate(sources):
             if "document" in source:
@@ -791,15 +817,15 @@ async def process_chat_payload(request, form_data, metadata, user, model):
 
         context_string = context_string.strip()
         prompt = get_last_user_message(form_data["messages"])
-
+        # log.info("context_string: %s", context_string)
         if prompt is None:
-            raise Exception("No user message found")
+            raise ValueError("No user message found")
         if (
             request.app.state.config.RELEVANCE_THRESHOLD == 0
             and context_string.strip() == ""
         ):
             log.debug(
-                f"With a 0 relevancy threshold for RAG, the context cannot be empty"
+                "With a 0 relevancy threshold for RAG, the context cannot be empty"
             )
 
         # Workaround for Ollama 2.0+ system prompt issue

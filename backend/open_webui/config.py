@@ -1643,25 +1643,14 @@ USE_GLOBAL_RAG = PersistentConfig(
 )
 
 # Milvus
-
+MILVUS_URI = os.environ.get("MILVUS_URI", f"{DATA_DIR}/vector_db/milvus.db")
 MILVUS_DB = os.environ.get("MILVUS_DB", "default")
 MILVUS_TOKEN = os.environ.get("MILVUS_TOKEN", None)
-MILVUS_URI = PersistentConfig(
-    "MILVUS_URI",
-    "rag.milvus_uri",
-    os.environ.get("MILVUS_URI", f"{DATA_DIR}/vector_db/milvus.db"),
-)
 
 COLLECTION_NAME = PersistentConfig(
     "COLLECTION_NAME",
     "rag.collection_name",
     os.environ.get("COLLECTION_NAME", ""),
-)
-
-EMBEDDING_MODEL_ID = PersistentConfig(
-    "EMBEDDING_MODEL_ID",
-    "rag.embedding_model_id",
-    os.environ.get("EMBEDDING_MODEL_ID", ""),
 )
 
 RAG_FILE_MAX_COUNT = PersistentConfig(

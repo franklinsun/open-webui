@@ -2,13 +2,11 @@ import json
 import logging
 from typing import Optional
 
-from open_webui.retrieval.vector.main import VectorItem, SearchResult, GetResult
-from open_webui.config import (
-    MILVUS_URI,
-    MILVUS_DB,
-    MILVUS_TOKEN,
-)
+from open_webui.config import MILVUS_DB, MILVUS_TOKEN, MILVUS_URI
 from open_webui.env import SRC_LOG_LEVELS
+from open_webui.retrieval.vector.main import GetResult, SearchResult, VectorItem
+from pymilvus import DataType, FieldSchema
+from pymilvus import MilvusClient as Client
 
 log = logging.getLogger(__name__)
 log.setLevel(SRC_LOG_LEVELS["RAG"])
@@ -17,12 +15,13 @@ log.setLevel(SRC_LOG_LEVELS["RAG"])
 class MilvusClient:
     def __init__(self):
         self.collection_prefix = "open_webui"
+        log.info(
+            "Connecting to Milvus, MILVUS_URI: %s, MILVUS_DB: %s", MILVUS_URI, MILVUS_DB
+        )
         if MILVUS_TOKEN is None:
-            self.client = Client(uri=str(MILVUS_URI), database=MILVUS_DB)
+            self.client = Client(uri=MILVUS_URI, database=MILVUS_DB)
         else:
-            self.client = Client(
-                uri=str(MILVUS_URI), database=MILVUS_DB, token=MILVUS_TOKEN
-            )
+            self.client = Client(uri=MILVUS_URI, database=MILVUS_DB, token=MILVUS_TOKEN)
 
     def _result_to_get_result(self, result) -> GetResult:
         ids = []
@@ -225,7 +224,7 @@ class MilvusClient:
             self._create_collection(
                 collection_name=collection_name, dimension=len(items[0]["vector"])
             )
-
+        log.info("item: %s", items)
         return self.client.insert(
             collection_name=f"{self.collection_prefix}_{collection_name}",
             data=[
@@ -295,3 +294,11 @@ class MilvusClient:
         for collection_name in collection_names:
             if collection_name.startswith(self.collection_prefix):
                 self.client.drop_collection(collection_name=collection_name)
+
+    def list_collections(self) -> list[str]:
+        # List all collection names that start with the collection prefix.
+        return [
+            collection_name
+            for collection_name in self.client.list_collections()
+            if collection_name.startswith(self.collection_prefix)
+        ]

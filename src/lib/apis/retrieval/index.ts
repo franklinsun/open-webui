@@ -58,9 +58,7 @@ type RAGConfigForm = {
 	web_loader_ssl_verification?: boolean;
 	youtube?: YoutubeConfigForm;
 	use_global_rag?: boolean;
-	milvus_uri?: string;
 	collection_name?: string;
-	embedding_model_id?: string;
 };
 
 export const updateRAGConfig = async (token: string, payload: RAGConfigForm) => {

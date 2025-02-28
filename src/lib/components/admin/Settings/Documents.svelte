@@ -77,10 +77,9 @@
 		hybrid: false
 	};
 
+	let collectionNames: string[] = [];
 	let useGlobalRAG = false;
-	let milvusUri = '';
 	let collectionName = '';
-	let embeddingModelId = '';
 
 	const embeddingModelUpdateHandler = async () => {
 		if (embeddingEngine === '' && embeddingModel.split('/').length - 1 > 1) {
@@ -175,27 +174,6 @@
 		}
 	};
 
-	const updateComponentPropertiesHandler = async () => {
-		const res = await updateRAGConfig(localStorage.token, {
-			use_global_rag: useGlobalRAG,
-			milvus_uri: milvusUri,
-			collection_name: collectionName,
-			embedding_model_id: embeddingModelId
-		}).catch(async (error) => {
-			toast.error(`${error}`);
-			return null;
-		});
-
-		if (res) {
-			console.log('updateComponentPropertiesHandler:', res);
-			if (res.status === true) {
-				toast.success($i18n.t('Component properties updated successfully'), {
-					duration: 1000 * 10
-				});
-			}
-		}
-	};
-
 	const submitHandler = async () => {
 		if (contentExtractionEngine === 'tika' && tikaServerUrl === '') {
 			toast.error($i18n.t('Tika Server URL required.'));
@@ -211,7 +189,6 @@
 
 		if (!BYPASS_EMBEDDING_AND_RETRIEVAL) {
 			await embeddingModelUpdateHandler();
-		await updateComponentPropertiesHandler();
 
 			if (querySettings.hybrid) {
 				await rerankingModelUpdateHandler();
@@ -242,9 +219,7 @@
 				}
 			},
 			use_global_rag: useGlobalRAG,
-			milvus_uri: milvusUri,
-			collection_name: collectionName,
-			embedding_model_id: embeddingModelId
+			collection_name: collectionName
 		});
 
 		await updateQuerySettings(localStorage.token, querySettings);
@@ -312,9 +287,8 @@
 			enableOneDriveIntegration = res.enable_onedrive_integration;
 
 			useGlobalRAG = res.use_global_rag;
-			milvusUri = res.milvus_uri;
 			collectionName = res.collection_name;
-			embeddingModelId = res.embedding_model_id;
+			collectionNames = res.collection_names;
 		}
 	});
 </script>
@@ -354,46 +328,6 @@
 	}}
 >
 	<div class=" space-y-2.5 overflow-y-scroll scrollbar-hidden h-full pr-1.5">
-		<div class="text-sm font-medium mb-1">{$i18n.t('Global RAG Expert Library')}</div>
-
-		<div class="flex justify-between items-center text-xs">
-			<div class="text-xs font-medium">{$i18n.t('Use Global RAG Expert Library')}</div>
-			<div>
-				<Switch bind:state={useGlobalRAG} />
-			</div>
-		</div>
-
-		{#if useGlobalRAG}
-			<div class="mt-2">
-				<div class="mb-1 text-xs font-medium">{$i18n.t('Milvus URI')}</div>
-				<input
-					class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
-					placeholder={$i18n.t('Enter Milvus URI')}
-					bind:value={milvusUri}
-				/>
-			</div>
-
-			<div class="mt-2">
-				<div class="mb-1 text-xs font-medium">{$i18n.t('Collection Name')}</div>
-				<input
-					class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
-					placeholder={$i18n.t('Enter Collection Name')}
-					bind:value={collectionName}
-				/>
-			</div>
-
-			<div class="mt-2">
-				<div class="mb-1 text-xs font-medium">{$i18n.t('Embedding Model ID')}</div>
-				<input
-					class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
-					placeholder={$i18n.t('Enter Embedding Model ID')}
-					bind:value={embeddingModelId}
-				/>
-			</div>
-		{/if}
-
-		<hr class=" border-gray-100 dark:border-gray-850" />
-
 		<div class="">
 			<div class="mb-3">
 				<div class=" mb-2.5 text-base font-medium">{$i18n.t('General')}</div>
@@ -757,110 +691,62 @@
 															animation: spinner_AtaB 0.75s infinite linear;
 														}
 
-											@keyframes spinner_AtaB {
-												100% {
-													transform: rotate(360deg);
-												}
-											}
-										</style>
-										<path
-											d="M12,1A11,11,0,1,0,23,12,11,11,0,0,0,12,1Zm0,19a8,8,0,1,1,8-8A8,8,0,0,1,12,20Z"
-											opacity=".25"
-										/>
-										<path
-											d="M10.14,1.16a11,11,0,0,0-9,8.92A1.59,1.59,0,0,0,2.46,12,1.52,1.52,0,0,0,4.11,10.7a8,8,0,0,1,6.66-6.61A1.42,1.42,0,0,0,12,2.69h0A1.57,1.57,0,0,0,10.14,1.16Z"
-											class="spinner_ajPY"
-										/>
-									</svg>
+														@keyframes spinner_AtaB {
+															100% {
+																transform: rotate(360deg);
+															}
+														}
+													</style>
+													<path
+														d="M12,1A11,11,0,1,0,23,12,11,11,0,0,0,12,1Zm0,19a8,8,0,1,1,8-8A8,8,0,0,1,12,20Z"
+														opacity=".25"
+													/>
+													<path
+														d="M10.14,1.16a11,11,0,0,0-9,8.92A1.59,1.59,0,0,0,2.46,12,1.52,1.52,0,0,0,4.11,10.7a8,8,0,0,1,6.66-6.61A1.42,1.42,0,0,0,12,2.69h0A1.57,1.57,0,0,0,10.14,1.16Z"
+														class="spinner_ajPY"
+													/>
+												</svg>
+											</div>
+										{:else}
+											<svg
+												xmlns="http://www.w3.org/2000/svg"
+												viewBox="0 0 16 16"
+												fill="currentColor"
+												class="w-4 h-4"
+											>
+												<path
+													d="M8.75 2.75a.75.75 0 0 0-1.5 0v5.69L5.03 6.22a.75.75 0 0 0-1.06 1.06l3.5 3.5a.75.75 0 0 0 1.06 0l3.5-3.5a.75.75 0 0 0-1.06-1.06L8.75 8.44V2.75Z"
+												/>
+												<path
+													d="M3.5 9.75a.75.75 0 0 0-1.5 0v1.5A2.75 2.75 0 0 0 4.75 14h6.5A2.75 2.75 0 0 0 14 11.25v-1.5a.75.75 0 0 0-1.5 0v1.5c0 .69-.56 1.25-1.25 1.25h-6.5c-.69 0-1.25-.56-1.25-1.25v-1.5Z"
+												/>
+											</svg>
+										{/if}
+									</button>
 								</div>
-							{:else}
-								<svg
-									xmlns="http://www.w3.org/2000/svg"
-									viewBox="0 0 16 16"
-									fill="currentColor"
-									class="w-4 h-4"
-								>
-									<path
-										d="M8.75 2.75a.75.75 0 0 0-1.5 0v5.69L5.03 6.22a.75.75 0 0 0-1.06 1.06l3.5 3.5a.75.75 0 0 0 1.06 0l3.5-3.5a.75.75 0 0 0-1.06-1.06L8.75 8.44V2.75Z"
-									/>
-									<path
-										d="M3.5 9.75a.75.75 0 0 0-1.5 0v1.5A2.75 2.75 0 0 0 4.75 14h6.5A2.75 2.75 0 0 0 14 11.25v-1.5a.75.75 0 0 0-1.5 0v1.5c0 .69-.56 1.25-1.25 1.25h-6.5c-.69 0-1.25-.56-1.25-1.25v-1.5Z"
-									/>
-								</svg>
-							{/if}
-						</button>
-					</div>
+							</div>
+						</div>
+					{/if}
 				</div>
-			{/if}
-		</div>
 
 				<div class="mb-3">
 					<div class=" mb-2.5 text-base font-medium">{$i18n.t('Retrieval')}</div>
 
 					<hr class=" border-gray-100 dark:border-gray-850 my-2" />
 
-			<div class="flex w-full justify-between">
-				<div class="self-center text-xs font-medium">{$i18n.t('Engine')}</div>
-				<div class="flex items-center relative">
-					<select
-						class="dark:bg-gray-900 w-fit pr-8 rounded-sm px-2 text-xs bg-transparent outline-hidden text-right"
-						bind:value={contentExtractionEngine}
-						on:change={(e) => {
-							showTikaServerUrl = e.target.value === 'tika';
-						}}
-					>
-						<option value="">{$i18n.t('Default')} </option>
-						<option value="tika">{$i18n.t('Tika')}</option>
-					</select>
-				</div>
-			</div>
-
-			{#if showTikaServerUrl}
-				<div class="flex w-full mt-1">
-					<div class="flex-1 mr-2">
-						<input
-							class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
-							placeholder={$i18n.t('Enter Tika Server URL')}
-							bind:value={tikaServerUrl}
-						/>
+					<div class="  mb-2.5 flex w-full justify-between">
+						<div class=" self-center text-xs font-medium">{$i18n.t('Top K')}</div>
+						<div class="flex items-center relative">
+							<input
+								class="flex-1 w-full rounded-lg text-sm bg-transparent outline-hidden"
+								type="number"
+								placeholder={$i18n.t('Enter Top K')}
+								bind:value={querySettings.k}
+								autocomplete="off"
+								min="0"
+							/>
+						</div>
 					</div>
-				</div>
-			{/if}
-		</div>
-
-		<hr class=" border-gray-100 dark:border-gray-850" />
-
-		<div class="text-sm font-medium mb-1">{$i18n.t('Google Drive')}</div>
-
-		<div class="">
-			<div class="flex justify-between items-center text-xs">
-				<div class="text-xs font-medium">{$i18n.t('Enable Google Drive')}</div>
-				<div>
-					<Switch bind:state={enableGoogleDriveIntegration} />
-				</div>
-			</div>
-		</div>
-
-		<hr class=" border-gray-100 dark:border-gray-850" />
-
-		<div class=" ">
-			<div class=" text-sm font-medium mb-1">{$i18n.t('Query Params')}</div>
-
-			<div class=" flex gap-1.5">
-				<div class="flex flex-col w-full gap-1">
-					<div class=" text-xs font-medium w-full">{$i18n.t('Top K')}</div>
-
-					<div class="w-full">
-						<input
-							class=" w-full rounded-lg py-1.5 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
-							type="number"
-							placeholder={$i18n.t('Enter Top K')}
-							bind:value={querySettings.k}
-							autocomplete="off"
-							min="0"
-						/>
-					</div>
-				</div>
 
 					{#if querySettings.hybrid === true}
 						<div class="  mb-2.5 flex flex-col w-full justify-between">
@@ -954,9 +840,59 @@
 					</div>
 				</div>
 			</div>
-		</div>
 
-		<hr class=" border-gray-100 dark:border-gray-850" />
+			<div class="mb-3">
+				<div class=" mb-2.5 text-base font-medium">{$i18n.t('Integration')}</div>
+
+				<hr class=" border-gray-100 dark:border-gray-850 my-2" />
+
+				<div class="  mb-2.5 flex w-full justify-between">
+					<div class=" self-center text-xs font-medium">{$i18n.t('Google Drive')}</div>
+					<div class="flex items-center relative">
+						<Switch bind:state={enableGoogleDriveIntegration} />
+					</div>
+				</div>
+
+				<div class="  mb-2.5 flex w-full justify-between">
+					<div class=" self-center text-xs font-medium">{$i18n.t('OneDrive')}</div>
+					<div class="flex items-center relative">
+						<Switch bind:state={enableOneDriveIntegration} />
+					</div>
+				</div>
+			</div>
+
+			<div class="mb-3">
+				<div class="text-sm font-medium mb-1">{$i18n.t('Global RAG Expert Library')}</div>
+
+				<hr class=" border-gray-100 dark:border-gray-850 my-2" />
+
+				<div class="flex justify-between items-center text-xs">
+					<div class="text-xs font-medium">{$i18n.t('Use Global RAG Expert Library')}</div>
+					<div>
+						<Switch bind:state={useGlobalRAG} />
+					</div>
+				</div>
+
+				{#if useGlobalRAG}
+					<div class="mb-2.5">
+						<div class="mb-1 text-xs font-medium">{$i18n.t('Collection Name')}</div>
+						<select
+							class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+							bind:value={collectionName}
+							required
+						>
+							{#each collectionNames as collection}
+								<option value={collection}>{collection}</option>
+							{/each}
+						</select>
+					</div>
+				{/if}
+			</div>
+
+			<div class="mb-3">
+				<div class=" mb-2.5 text-base font-medium">{$i18n.t('Danger Zone')}</div>
+
+				<hr class=" border-gray-100 dark:border-gray-850 my-2" />
 
 				<div class="  mb-2.5 flex w-full justify-between">
 					<div class=" self-center text-xs font-medium">{$i18n.t('Reset Upload Directory')}</div>
@@ -972,31 +908,22 @@
 					</div>
 				</div>
 
-			<button
-				class=" flex rounded-xl py-2 px-3.5 w-full hover:bg-gray-200 dark:hover:bg-gray-800 transition"
-				on:click={() => {
-					showResetConfirm = true;
-				}}
-				type="button"
-			>
-				<div class=" self-center mr-3">
-					<svg
-						xmlns="http://www.w3.org/2000/svg"
-						viewBox="0 0 16 16"
-						fill="currentColor"
-						class="w-4 h-4"
-					>
-						<path
-							fill-rule="evenodd"
-							d="M3.5 2A1.5 1.5 0 0 0 2 3.5v9A1.5 1.5 0 0 0 3.5 14h9a1.5 1.5 0 0 0 1.5-1.5v-7A1.5 1.5 0 0 0 12.5 4H9.621a1.5 1.5 0 0 1-1.06-.44L7.439 2.44A1.5 1.5 0 0 0 6.38 2H3.5Zm6.75 7.75a.75.75 0 0 0 0-1.5h-4.5a.75.75 0 0 0 0 1.5h4.5Z"
-							clip-rule="evenodd"
-						/>
-					</svg>
+				<div class="  mb-2.5 flex w-full justify-between">
+					<div class=" self-center text-xs font-medium">
+						{$i18n.t('Reset Vector Storage/Knowledge')}
+					</div>
+					<div class="flex items-center relative">
+						<button
+							class="text-xs"
+							on:click={() => {
+								showResetConfirm = true;
+							}}
+						>
+							{$i18n.t('Reset')}
+						</button>
+					</div>
 				</div>
-				<div class=" self-center text-sm font-medium">
-					{$i18n.t('Reset Vector Storage/Knowledge')}
-				</div>
-			</button>
+			</div>
 		</div>
 	</div>
 	<div class="flex justify-end pt-3 text-sm font-medium">

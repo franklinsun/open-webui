@@ -335,9 +335,12 @@ async def get_rag_config(request: Request, user=Depends(get_admin_user)):
     return {
         "status": True,
         "use_global_rag": request.app.state.config.USE_GLOBAL_RAG,
-        "milvus_uri": request.app.state.config.MILVUS_URI,
         "collection_name": request.app.state.config.COLLECTION_NAME,
-        "embedding_model_id": request.app.state.config.EMBEDDING_MODEL_ID,
+        "collection_names": [
+            name.replace("open_webui_", "")
+            for name in VECTOR_DB_CLIENT.list_collections()
+            if not name.startswith("open_webui_file_")
+        ],
         "pdf_extract_images": request.app.state.config.PDF_EXTRACT_IMAGES,
         "RAG_FULL_CONTEXT": request.app.state.config.RAG_FULL_CONTEXT,
         "BYPASS_EMBEDDING_AND_RETRIEVAL": request.app.state.config.BYPASS_EMBEDDING_AND_RETRIEVAL,
@@ -477,9 +480,7 @@ class ConfigUpdateForm(BaseModel):
     youtube: Optional[YoutubeLoaderConfig] = None
     web: Optional[WebConfig] = None
     use_global_rag: Optional[bool] = None
-    milvus_uri: Optional[str] = None
     collection_name: Optional[str] = None
-    embedding_model_id: Optional[str] = None
 
 
 @router.post("/config/update")
@@ -628,22 +629,10 @@ async def update_rag_config(
         else request.app.state.config.USE_GLOBAL_RAG
     )
 
-    request.app.state.config.MILVUS_URI = (
-        form_data.milvus_uri
-        if form_data.milvus_uri is not None
-        else request.app.state.config.MILVUS_URI
-    )
-
     request.app.state.config.COLLECTION_NAME = (
         form_data.collection_name
         if form_data.collection_name is not None
         else request.app.state.config.COLLECTION_NAME
-    )
-
-    request.app.state.config.EMBEDDING_MODEL_ID = (
-        form_data.embedding_model_id
-        if form_data.embedding_model_id is not None
-        else request.app.state.config.EMBEDDING_MODEL_ID
     )
 
     return {
@@ -706,9 +695,7 @@ async def update_rag_config(
             },
         },
         "use_global_rag": request.app.state.config.USE_GLOBAL_RAG,
-        "milvus_uri": request.app.state.config.MILVUS_URI,
         "collection_name": request.app.state.config.COLLECTION_NAME,
-        "embedding_model_id": request.app.state.config.EMBEDDING_MODEL_ID,
     }
 
 
@@ -793,7 +780,7 @@ def save_docs_to_vector_db(
         return ", ".join(docs_info)
 
     log.info(
-        f"save_docs_to_vector_db: document {_get_docs_info(docs)} {collection_name}"
+        "save_docs_to_vector_db: document %s %s", _get_docs_info(docs), collection_name
     )
 
     # Check if entries with the same hash (metadata.hash) already exist
@@ -806,7 +793,7 @@ def save_docs_to_vector_db(
         if result is not None:
             existing_doc_ids = result.ids[0]
             if existing_doc_ids:
-                log.info(f"Document with hash {metadata['hash']} already exists")
+                log.info("Document with hash %s already exists", metadata["hash"])
                 raise ValueError(ERROR_MESSAGES.DUPLICATE_CONTENT)
 
     if split:
@@ -818,7 +805,8 @@ def save_docs_to_vector_db(
             )
         elif request.app.state.config.TEXT_SPLITTER == "token":
             log.info(
-                f"Using token text splitter: {request.app.state.config.TIKTOKEN_ENCODING_NAME}"
+                "Using token text splitter: %s",
+                request.app.state.config.TIKTOKEN_ENCODING_NAME,
             )
 
             tiktoken.get_encoding(str(request.app.state.config.TIKTOKEN_ENCODING_NAME))
@@ -864,18 +852,19 @@ def save_docs_to_vector_db(
 
     try:
         if VECTOR_DB_CLIENT.has_collection(collection_name=collection_name):
-            log.info(f"collection {collection_name} already exists")
+            log.info("collection %s already exists", collection_name)
 
             if overwrite:
                 VECTOR_DB_CLIENT.delete_collection(collection_name=collection_name)
-                log.info(f"deleting existing collection {collection_name}")
+                log.info("deleting existing collection %s", collection_name)
             elif add is False:
                 log.info(
-                    f"collection {collection_name} already exists, overwrite is False and add is False"
+                    "collection %s already exists, overwrite is False and add is False",
+                    collection_name,
                 )
                 return True
 
-        log.info(f"adding to collection {collection_name}")
+        log.info("adding to collection %s", collection_name)
         embedding_function = get_embedding_function(
             request.app.state.config.RAG_EMBEDDING_ENGINE,
             request.app.state.config.RAG_EMBEDDING_MODEL,
@@ -907,7 +896,7 @@ def save_docs_to_vector_db(
             for idx, text in enumerate(texts)
         ]
 
-        VECTOR_DB_CLIENT.insert(
+        VECTOR_DB_CLIENT.upsert(
             collection_name=collection_name,
             items=items,
         )
@@ -933,7 +922,8 @@ def process_file(
     try:
         file = Files.get_file_by_id(form_data.file_id)
 
-        collection_name = form_data.collection_name
+        # collection_name = form_data.collection_name
+        collection_name = "okr_collection"
 
         if collection_name is None:
             collection_name = f"file-{file.id}"
@@ -945,9 +935,8 @@ def process_file(
             try:
                 # /files/{file_id}/data/content/update
                 VECTOR_DB_CLIENT.delete_collection(collection_name=f"file-{file.id}")
-            except:
-                # Audio file upload pipeline
-                pass
+            except Exception as e:
+                log.error("Error deleting collection: %s", e)
 
             docs = [
                 Document(
@@ -968,7 +957,7 @@ def process_file(
             # Usage: /knowledge/{id}/file/add, /knowledge/{id}/file/update
 
             result = VECTOR_DB_CLIENT.query(
-                collection_name=f"file-{file.id}", filter={"file_id": file.id}
+                collection_name=collection_name, filter={"file_id": file.id}
             )
 
             if result is not None and len(result.ids[0]) > 0:
@@ -1039,14 +1028,14 @@ def process_file(
                 ]
             text_content = " ".join([doc.page_content for doc in docs])
 
-        log.debug(f"text_content: {text_content}")
+        log.debug("text_content: %s", text_content)
         Files.update_file_data_by_id(
             file.id,
             {"content": text_content},
         )
 
-        hash = calculate_sha256_string(text_content)
-        Files.update_file_hash_by_id(file.id, hash)
+        file_hash = calculate_sha256_string(text_content)
+        Files.update_file_hash_by_id(file.id, file_hash)
 
         if not request.app.state.config.BYPASS_EMBEDDING_AND_RETRIEVAL:
             try:
@@ -1057,9 +1046,14 @@ def process_file(
                     metadata={
                         "file_id": file.id,
                         "name": file.filename,
-                        "hash": hash,
+                        "hash": file_hash,
                     },
-                    add=(True if form_data.collection_name else False),
+                    add=(
+                        True
+                        if form_data.collection_name
+                        or not collection_name.startswith("file-")
+                        else False
+                    ),
                     user=user,
                 )
 
@@ -1093,12 +1087,12 @@ def process_file(
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=ERROR_MESSAGES.PANDOC_NOT_INSTALLED,
-            )
+            ) from e
         else:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=str(e),
-            )
+            ) from e
 
 
 class ProcessTextForm(BaseModel):

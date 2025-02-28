@@ -2,10 +2,10 @@ import logging
 import time
 from typing import Optional
 
-from open_webui.internal.db import Base, JSONField, get_db
 from open_webui.env import SRC_LOG_LEVELS
+from open_webui.internal.db import Base, JSONField, get_db
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import BigInteger, Column, String, Text, JSON
+from sqlalchemy import JSON, BigInteger, Column, String, Text
 
 log = logging.getLogger(__name__)
 log.setLevel(SRC_LOG_LEVELS["MODELS"])
@@ -119,7 +119,7 @@ class FilesTable:
                 else:
                     return None
             except Exception as e:
-                log.exception(f"Error inserting a new file: {e}")
+                log.exception("Error inserting a new file: %s", e)
                 return None
 
     def get_file_by_id(self, id: str) -> Optional[FileModel]:

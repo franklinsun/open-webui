@@ -146,7 +146,7 @@ def replace_messages_variable(
 
 
 def rag_template(template: str, context: str, query: str):
-    log.info(f"RAG template: {template}, context: {context}, query: {query}")
+    log.debug("RAG template: %s, context: %s, query: %s", template, context, query)
     if template.strip() == "":
         template = DEFAULT_RAG_TEMPLATE
 
@@ -180,7 +180,7 @@ def rag_template(template: str, context: str, query: str):
 
     for query_placeholder in query_placeholders:
         template = template.replace(query_placeholder, query)
-    log.info(f"RAG template: {template}")
+    log.debug("RAG template: %s", template)
     return template
 
 

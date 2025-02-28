@@ -1,28 +1,22 @@
 import asyncio
+import hashlib
 import logging
 import os
 import uuid
 from typing import Optional, Union
 
 import requests
-import hashlib
-
 from huggingface_hub import snapshot_download
 from langchain.retrievers import ContextualCompressionRetriever, EnsembleRetriever
 from langchain_community.retrievers import BM25Retriever
 from langchain_core.documents import Document
 from open_webui.config import VECTOR_DB
-from open_webui.retrieval.vector.connector import VECTOR_DB_CLIENT
-from open_webui.utils.misc import get_last_user_message, calculate_sha256_string
-
-from open_webui.models.users import UserModel
-from open_webui.models.files import Files
-
 from open_webui.env import (
     ENABLE_FORWARD_USER_INFO_HEADERS,
     OFFLINE_MODE,
     SRC_LOG_LEVELS,
 )
+from open_webui.models.files import Files
 from open_webui.models.users import UserModel
 from open_webui.retrieval.vector.connector import VECTOR_DB_CLIENT
 from open_webui.utils.misc import calculate_sha256_string, get_last_user_message
@@ -139,15 +133,17 @@ def query_doc_with_hybrid_search(
         )
 
         result = compression_retriever.invoke(query)
+
         result = {
             "distances": [[d.metadata.get("score") for d in result]],
             "documents": [[d.page_content for d in result]],
             "metadatas": [[d.metadata for d in result]],
         }
 
-        log.info(
-            "query_doc_with_hybrid_search:result "
-            + f'{result["metadatas"]} {result["distances"]}'
+        log.debug(
+            "query_doc_with_hybrid_search:result %s %s",
+            result["metadatas"],
+            result["distances"],
         )
         return result
     except Exception as e:
@@ -222,6 +218,7 @@ def get_all_items_from_collections(collection_names: list[str]) -> dict:
                 result = get_doc(collection_name=collection_name)
                 if result is not None:
                     results.append(result.model_dump())
+                    log.info(f"get_all_items_from_collections:result {result}")
             except Exception as e:
                 log.exception(f"Error when querying the collection: {e}")
         else:
@@ -286,12 +283,12 @@ def query_collection_with_hybrid_search(
                 results.append(result)
         except Exception as e:
             log.exception(
-                "Error when querying the collection with " f"hybrid_search: {e}"
+                "Error when querying the collection with hybrid_search: %s", e
             )
             error = True
 
     if error:
-        raise Exception(
+        raise RuntimeError(
             "Hybrid search failed for all collections. Using Non hybrid search as fallback."
         )
 
@@ -339,6 +336,73 @@ def get_embedding_function(
         raise ValueError(f"Unknown embedding engine: {embedding_engine}")
 
 
+def get_sources_from_global_rag(
+    collection_names,
+    queries,
+    embedding_function,
+    k,
+    reranking_function,
+    r,
+    hybrid_search,
+    full_context=False,
+):
+    log.debug(
+        "collection_names: %s, queries: %s, full_context: %s",
+        collection_names,
+        queries,
+        full_context,
+    )
+
+    context = None
+    if full_context:
+        try:
+            context = get_all_items_from_collections(collection_names)
+        except Exception as e:
+            log.exception(e)
+    else:
+        try:
+            context = None
+            if hybrid_search:
+                try:
+                    context = query_collection_with_hybrid_search(
+                        collection_names=collection_names,
+                        queries=queries,
+                        embedding_function=embedding_function,
+                        k=k,
+                        reranking_function=reranking_function,
+                        r=r,
+                    )
+                except Exception as e:
+                    log.debug(
+                        "Error when using hybrid search, using non hybrid search as fallback."
+                    )
+
+            if (not hybrid_search) or (context is None):
+                context = query_collection(
+                    collection_names=collection_names,
+                    queries=queries,
+                    embedding_function=embedding_function,
+                    k=k,
+                )
+        except Exception as e:
+            log.exception(e)
+
+    sources = []
+    if "documents" in context:
+        if "metadatas" in context:
+            for i, document in enumerate(context["documents"][0]):
+                source = {
+                    "source": context["metadatas"][0][i],
+                    "document": [document],
+                }
+                if "distances" in context and context["distances"]:
+                    source["distances"] = context["distances"][0][i]
+
+                sources.append(source)
+
+    return sources
+
+
 def get_sources_from_files(
     request,
     files,
@@ -350,12 +414,10 @@ def get_sources_from_files(
     hybrid_search,
     full_context=False,
 ):
-    log.debug(
-        "files: %s %s %s %s %s",
+    log.info(
+        "files: %s, queries: %s, full_context: %s",
         files,
         queries,
-        embedding_function,
-        reranking_function,
         full_context,
     )
 
@@ -437,7 +499,7 @@ def get_sources_from_files(
 
             collection_names = set(collection_names).difference(extracted_collections)
             if not collection_names:
-                log.debug(f"skipping {file} as it has already been extracted")
+                log.debug("skipping %s as it has already been extracted", file)
                 continue
 
             if full_context:
