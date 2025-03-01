@@ -7,6 +7,7 @@ from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
 from fastapi.responses import FileResponse, StreamingResponse
+from open_webui.config import RAG_KNOWLEDGE_URI
 from open_webui.constants import ERROR_MESSAGES
 from open_webui.env import SRC_LOG_LEVELS
 from open_webui.models.files import FileForm, FileModel, FileModelResponse, Files
@@ -27,34 +28,87 @@ router = APIRouter()
 ############################
 
 
+@router.post("/upload_rag_knowledge")
+async def process_rag_knowledge_uri(request: Request, user=Depends(get_verified_user)):
+    try:
+        base_path = Path(RAG_KNOWLEDGE_URI)
+        if not base_path.exists():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Path {RAG_KNOWLEDGE_URI} does not exist",
+            )
+        for root, dirs, files in os.walk(base_path):
+            if root == RAG_KNOWLEDGE_URI:
+                continue
+            for file_name in files:
+                file_path = Path(root) / file_name
+                relative_path = file_path.relative_to(base_path)
+                collection_name = relative_path.parts[0]
+                log.info(f"Processing file: {file_path}, collection: {collection_name}")
+
+                upload_file(
+                    request=request,
+                    file=UploadFile(file_path.open("rb"), filename=file_name),
+                    user=user,
+                    file_metadata={
+                        "collection_name": collection_name,
+                    },
+                )
+        return {"message": "RAG knowledge URI processed successfully"}
+    except Exception as e:
+        log.exception(e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e),
+        ) from e
+
+
 @router.post("/", response_model=FileModelResponse)
 def upload_file(
     request: Request,
     file: UploadFile = File(...),
     user=Depends(get_verified_user),
-    file_metadata: dict = {},
+    file_metadata: Optional[dict] = None,
 ):
-    log.info(f"file.content_type: {file.content_type}")
+    if file_metadata is None:
+        file_metadata = {}
     try:
-        unsanitized_filename = file.filename
+        file_name = file.filename
+        content_type = file.content_type
+        if not content_type:
+            # Automatically detect the file type
+            if file_name.lower().endswith((".jpg", ".jpeg", ".png", ".gif")):
+                content_type = "image/jpeg"
+            elif file_name.lower().endswith(".pdf"):
+                content_type = "application/pdf"
+            elif file_name.lower().endswith((".mp3", ".wav", ".ogg", ".m4a")):
+                content_type = "audio/mpeg"
+            elif file_name.lower().endswith(".txt"):
+                content_type = "text/plain"
+            else:
+                content_type = "application/octet-stream"
+
+        log.info("file.content_type: %s, metadata: %s", content_type, file_metadata)
+
+        unsanitized_filename = file_name
         filename = os.path.basename(unsanitized_filename)
 
         # replace filename with uuid
-        id = str(uuid.uuid4())
+        file_id = str(uuid.uuid4())
         name = filename
-        filename = f"{id}_{filename}"
+        filename = f"{file_id}_{filename}"
         contents, file_path = Storage.upload_file(file.file, filename)
 
         file_item = Files.insert_new_file(
             user.id,
             FileForm(
                 **{
-                    "id": id,
+                    "id": file_id,
                     "filename": name,
                     "path": file_path,
                     "meta": {
                         "name": name,
-                        "content_type": file.content_type,
+                        "content_type": content_type,
                         "size": len(contents),
                         "data": file_metadata,
                     },
@@ -63,7 +117,7 @@ def upload_file(
         )
 
         try:
-            if file.content_type in [
+            if content_type in [
                 "audio/mpeg",
                 "audio/wav",
                 "audio/ogg",
@@ -73,16 +127,27 @@ def upload_file(
                 result = transcribe(request, file_path)
                 process_file(
                     request,
-                    ProcessFileForm(file_id=id, content=result.get("text", "")),
+                    ProcessFileForm(
+                        file_id=file_id,
+                        content=result.get("text", ""),
+                        global_collection_name=file_metadata.get("collection_name", ""),
+                    ),
                     user=user,
                 )
             else:
-                process_file(request, ProcessFileForm(file_id=id), user=user)
+                process_file(
+                    request,
+                    ProcessFileForm(
+                        file_id=file_id,
+                        global_collection_name=file_metadata.get("collection_name", ""),
+                    ),
+                    user=user,
+                )
 
-            file_item = Files.get_file_by_id(id=id)
+            file_item = Files.get_file_by_id(id=file_id)
         except Exception as e:
             log.exception(e)
-            log.error(f"Error processing file: {file_item.id}")
+            log.error("Error processing file: %s", file_item.id)
             file_item = FileModelResponse(
                 **{
                     **file_item.model_dump(),
@@ -103,7 +168,7 @@ def upload_file(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=ERROR_MESSAGES.DEFAULT(e),
-        )
+        ) from e
 
 
 ############################

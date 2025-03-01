@@ -911,6 +911,7 @@ class ProcessFileForm(BaseModel):
     file_id: str
     content: Optional[str] = None
     collection_name: Optional[str] = None
+    global_collection_name: Optional[str] = None
 
 
 @router.post("/process/file")
@@ -922,8 +923,7 @@ def process_file(
     try:
         file = Files.get_file_by_id(form_data.file_id)
 
-        # collection_name = form_data.collection_name
-        collection_name = "okr_collection"
+        collection_name = form_data.collection_name
 
         if collection_name is None:
             collection_name = f"file-{file.id}"
@@ -957,7 +957,7 @@ def process_file(
             # Usage: /knowledge/{id}/file/add, /knowledge/{id}/file/update
 
             result = VECTOR_DB_CLIENT.query(
-                collection_name=collection_name, filter={"file_id": file.id}
+                collection_name=f"file-{file.id}", filter={"file_id": file.id}
             )
 
             if result is not None and len(result.ids[0]) > 0:
@@ -995,6 +995,12 @@ def process_file(
                     PDF_EXTRACT_IMAGES=request.app.state.config.PDF_EXTRACT_IMAGES,
                     DOCUMENT_INTELLIGENCE_ENDPOINT=request.app.state.config.DOCUMENT_INTELLIGENCE_ENDPOINT,
                     DOCUMENT_INTELLIGENCE_KEY=request.app.state.config.DOCUMENT_INTELLIGENCE_KEY,
+                )
+                log.info(
+                    "Loading file: %s, content_type: %s, file_path: %s",
+                    file.filename,
+                    file.meta.get("content_type"),
+                    file_path,
                 )
                 docs = loader.load(
                     file.filename, file.meta.get("content_type"), file_path
@@ -1039,6 +1045,11 @@ def process_file(
 
         if not request.app.state.config.BYPASS_EMBEDDING_AND_RETRIEVAL:
             try:
+                collection_name = (
+                    form_data.global_collection_name
+                    if form_data.global_collection_name
+                    else collection_name
+                )
                 result = save_docs_to_vector_db(
                     request,
                     docs=docs,
@@ -1050,8 +1061,7 @@ def process_file(
                     },
                     add=(
                         True
-                        if form_data.collection_name
-                        or not collection_name.startswith("file-")
+                        if form_data.collection_name or form_data.global_collection_name
                         else False
                     ),
                     user=user,

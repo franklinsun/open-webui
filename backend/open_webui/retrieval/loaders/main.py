@@ -1,14 +1,15 @@
-import requests
 import logging
-import ftfy
 import sys
 
+import ftfy
+import requests
 from langchain_community.document_loaders import (
     AzureAIDocumentIntelligenceLoader,
     BSHTMLLoader,
     CSVLoader,
     Docx2txtLoader,
     OutlookMessageLoader,
+    PyMuPDFLoader,
     PyPDFLoader,
     TextLoader,
     UnstructuredEPubLoader,
@@ -20,7 +21,7 @@ from langchain_community.document_loaders import (
     YoutubeLoader,
 )
 from langchain_core.documents import Document
-from open_webui.env import SRC_LOG_LEVELS, GLOBAL_LOG_LEVEL
+from open_webui.env import GLOBAL_LOG_LEVEL, SRC_LOG_LEVELS
 
 logging.basicConfig(stream=sys.stdout, level=GLOBAL_LOG_LEVEL)
 log = logging.getLogger(__name__)
@@ -139,6 +140,7 @@ class Loader:
         file_ext = filename.split(".")[-1].lower()
 
         if self.engine == "tika" and self.kwargs.get("TIKA_SERVER_URL"):
+            log.info("Loading file with Tika loader")
             if file_ext in known_source_ext or (
                 file_content_type and file_content_type.find("text/") >= 0
             ):
@@ -165,14 +167,16 @@ class Loader:
                 ]
             )
         ):
+            log.info("Loading file with Azure AI Document Intelligence loader")
             loader = AzureAIDocumentIntelligenceLoader(
                 file_path=file_path,
                 api_endpoint=self.kwargs.get("DOCUMENT_INTELLIGENCE_ENDPOINT"),
                 api_key=self.kwargs.get("DOCUMENT_INTELLIGENCE_KEY"),
             )
         else:
+            log.info("Loading file with default loader")
             if file_ext == "pdf":
-                loader = PyPDFLoader(
+                loader = PyMuPDFLoader(
                     file_path, extract_images=self.kwargs.get("PDF_EXTRACT_IMAGES")
                 )
             elif file_ext == "csv":

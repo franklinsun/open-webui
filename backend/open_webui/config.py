@@ -1647,6 +1647,8 @@ MILVUS_URI = os.environ.get("MILVUS_URI", f"{DATA_DIR}/vector_db/milvus.db")
 MILVUS_DB = os.environ.get("MILVUS_DB", "default")
 MILVUS_TOKEN = os.environ.get("MILVUS_TOKEN", None)
 
+RAG_KNOWLEDGE_URI = os.environ.get("RAG_KNOWLEDGE_URI", f"{DATA_DIR}/knowledge")
+
 COLLECTION_NAME = PersistentConfig(
     "COLLECTION_NAME",
     "rag.collection_name",
