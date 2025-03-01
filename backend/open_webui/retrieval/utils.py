@@ -414,7 +414,7 @@ def get_sources_from_files(
     hybrid_search,
     full_context=False,
 ):
-    log.info(
+    log.debug(
         "files: %s, queries: %s, full_context: %s",
         files,
         queries,

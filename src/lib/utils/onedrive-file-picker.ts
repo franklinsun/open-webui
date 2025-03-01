@@ -73,6 +73,14 @@ async function getToken(): Promise<string> {
 	return accessToken;
 }
 
+function generateUUID() {
+	return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
+		const r = (Math.random() * 16) | 0,
+			v = c === 'x' ? r : (r & 0x3) | 0x8;
+		return v.toString(16);
+	});
+}
+
 const baseUrl = 'https://onedrive.live.com/picker';
 const params = {
 	sdk: '8.0',
@@ -84,7 +92,7 @@ const params = {
 	authentication: {},
 	messaging: {
 		origin: window?.location?.origin,
-		channelId: crypto.randomUUID()
+		channelId: generateUUID()
 	},
 	typesAndSources: {
 		mode: 'files',

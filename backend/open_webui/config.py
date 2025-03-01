@@ -797,7 +797,7 @@ GEMINI_API_BASE_URL = os.environ.get("GEMINI_API_BASE_URL", "")
 
 
 if OPENAI_API_BASE_URL == "":
-    OPENAI_API_BASE_URL = "http://172.17.0.1/v1"
+    OPENAI_API_BASE_URL = "http://172.17.0.1:11434/v1"
 
 OPENAI_API_KEYS = os.environ.get("OPENAI_API_KEYS", "")
 OPENAI_API_KEYS = OPENAI_API_KEYS if OPENAI_API_KEYS != "" else OPENAI_API_KEY
@@ -813,7 +813,7 @@ OPENAI_API_BASE_URLS = (
 )
 
 OPENAI_API_BASE_URLS = [
-    url.strip() if url != "" else "http://172.17.0.1/v1"
+    url.strip() if url != "" else "http://172.17.0.1:11434/v1"
     for url in OPENAI_API_BASE_URLS.split(";")
 ]
 OPENAI_API_BASE_URLS = PersistentConfig(
@@ -830,11 +830,11 @@ OPENAI_API_CONFIGS = PersistentConfig(
 OPENAI_API_KEY = ""
 try:
     OPENAI_API_KEY = OPENAI_API_KEYS.value[
-        OPENAI_API_BASE_URLS.value.index("http://172.17.0.1/v1")
+        OPENAI_API_BASE_URLS.value.index("http://172.17.0.1:11434/v1")
     ]
 except Exception:
     pass
-OPENAI_API_BASE_URL = "http://172.17.0.1/v1"
+OPENAI_API_BASE_URL = "http://172.17.0.1:11434/v1"
 
 ####################################
 # WEBUI
