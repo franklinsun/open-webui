@@ -808,7 +808,6 @@ async def process_chat_payload(request, form_data, metadata, user, model):
     # If context is not empty, insert it into the messages
 
     if len(sources) > 0:
-        log.info("sources: %s", sources)
         context_string = ""
         for source_idx, source in enumerate(sources):
             if "document" in source:
