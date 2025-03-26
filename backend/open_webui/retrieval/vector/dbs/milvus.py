@@ -19,9 +19,9 @@ class MilvusClient:
             "Connecting to Milvus, MILVUS_URI: %s, MILVUS_DB: %s", MILVUS_URI, MILVUS_DB
         )
         if MILVUS_TOKEN is None:
-            self.client = Client(uri=MILVUS_URI, database=MILVUS_DB)
+            self.client = Client(uri=MILVUS_URI, db_name=MILVUS_DB)
         else:
-            self.client = Client(uri=MILVUS_URI, database=MILVUS_DB, token=MILVUS_TOKEN)
+            self.client = Client(uri=MILVUS_URI, db_name=MILVUS_DB, token=MILVUS_TOKEN)
 
     def _result_to_get_result(self, result) -> GetResult:
         ids = []

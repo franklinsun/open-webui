@@ -101,7 +101,7 @@ def replace_prompt_variable(template: str, prompt: str) -> str:
 
 
 def replace_messages_variable(
-    template: str, messages: Optional[list[str]] = None
+    template: str, messages: Optional[list[dict]] = None
 ) -> str:
     def replacement_function(match):
         full_match = match.group(0)

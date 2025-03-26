@@ -31,38 +31,74 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from open_webui.config import (  # Ollama; OpenAI; Direct Connections; Code Execution; Image; Audio; Retrieval; Retrieval (Web Search); WebUI; WebUI (OAuth); WebUI (LDAP); Misc; Admin; Tasks
-    ADMIN_EMAIL,
-    API_KEY_ALLOWED_ENDPOINTS,
-    AUDIO_STT_ENGINE,
-    AUDIO_STT_MODEL,
-    AUDIO_STT_OPENAI_API_BASE_URL,
-    AUDIO_STT_OPENAI_API_KEY,
-    AUDIO_TTS_API_KEY,
-    AUDIO_TTS_AZURE_SPEECH_OUTPUT_FORMAT,
-    AUDIO_TTS_AZURE_SPEECH_REGION,
-    AUDIO_TTS_ENGINE,
-    AUDIO_TTS_MODEL,
-    AUDIO_TTS_OPENAI_API_BASE_URL,
-    AUDIO_TTS_OPENAI_API_KEY,
-    AUDIO_TTS_SPLIT_ON,
-    AUDIO_TTS_VOICE,
-    AUTOCOMPLETE_GENERATION_INPUT_MAX_LENGTH,
-    AUTOCOMPLETE_GENERATION_PROMPT_TEMPLATE,
-    AUTOMATIC1111_API_AUTH,
-    AUTOMATIC1111_BASE_URL,
-    AUTOMATIC1111_CFG_SCALE,
-    AUTOMATIC1111_SAMPLER,
-    AUTOMATIC1111_SCHEDULER,
-    BING_SEARCH_V7_ENDPOINT,
-    BING_SEARCH_V7_SUBSCRIPTION_KEY,
-    BOCHA_SEARCH_API_KEY,
-    BRAVE_SEARCH_API_KEY,
-    BYPASS_EMBEDDING_AND_RETRIEVAL,
-    BYPASS_WEB_SEARCH_EMBEDDING_AND_RETRIEVAL,
-    CACHE_DIR,
-    CHUNK_OVERLAP,
-    CHUNK_SIZE,
+
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.middleware.sessions import SessionMiddleware
+from starlette.responses import Response, StreamingResponse
+
+
+from open_webui.utils import logger
+from open_webui.utils.audit import AuditLevel, AuditLoggingMiddleware
+from open_webui.utils.logger import start_logger
+from open_webui.socket.main import (
+    app as socket_app,
+    periodic_usage_pool_cleanup,
+)
+from open_webui.routers import (
+    audio,
+    images,
+    ollama,
+    openai,
+    retrieval,
+    pipelines,
+    tasks,
+    auths,
+    channels,
+    chats,
+    folders,
+    configs,
+    groups,
+    files,
+    functions,
+    memories,
+    models,
+    knowledge,
+    prompts,
+    evaluations,
+    tools,
+    users,
+    utils,
+)
+
+from open_webui.routers.retrieval import (
+    get_embedding_function,
+    get_ef,
+    get_rf,
+)
+
+from open_webui.internal.db import Session
+
+from open_webui.models.functions import Functions
+from open_webui.models.models import Models
+from open_webui.models.users import UserModel, Users
+
+from open_webui.config import (
+    LICENSE_KEY,
+    # Ollama
+    ENABLE_OLLAMA_API,
+    OLLAMA_BASE_URLS,
+    OLLAMA_API_CONFIGS,
+    # OpenAI
+    ENABLE_OPENAI_API,
+    ONEDRIVE_CLIENT_ID,
+    OPENAI_API_BASE_URLS,
+    OPENAI_API_KEYS,
+    OPENAI_API_CONFIGS,
+    # Direct Connections
+    ENABLE_DIRECT_CONNECTIONS,
+    # Code Execution
+    ENABLE_CODE_EXECUTION,
     CODE_EXECUTION_ENGINE,
     CODE_EXECUTION_JUPYTER_AUTH,
     CODE_EXECUTION_JUPYTER_AUTH_PASSWORD,
@@ -208,6 +244,33 @@ from open_webui.config import (  # Ollama; OpenAI; Direct Connections; Code Exec
     SERPLY_API_KEY,
     SERPSTACK_API_KEY,
     SERPSTACK_HTTPS,
+    TAVILY_API_KEY,
+    BING_SEARCH_V7_ENDPOINT,
+    BING_SEARCH_V7_SUBSCRIPTION_KEY,
+    BRAVE_SEARCH_API_KEY,
+    EXA_API_KEY,
+    PERPLEXITY_API_KEY,
+    KAGI_SEARCH_API_KEY,
+    MOJEEK_SEARCH_API_KEY,
+    BOCHA_SEARCH_API_KEY,
+    GOOGLE_PSE_API_KEY,
+    GOOGLE_PSE_ENGINE_ID,
+    GOOGLE_DRIVE_CLIENT_ID,
+    GOOGLE_DRIVE_API_KEY,
+    ONEDRIVE_CLIENT_ID,
+    ENABLE_RAG_HYBRID_SEARCH,
+    ENABLE_RAG_LOCAL_WEB_FETCH,
+    ENABLE_RAG_WEB_LOADER_SSL_VERIFICATION,
+    ENABLE_RAG_WEB_SEARCH,
+    ENABLE_GOOGLE_DRIVE_INTEGRATION,
+    ENABLE_ONEDRIVE_INTEGRATION,
+    UPLOAD_DIR,
+    # WebUI
+    WEBUI_AUTH,
+    WEBUI_NAME,
+    WEBUI_BANNERS,
+    WEBHOOK_URL,
+    ADMIN_EMAIL,
     SHOW_ADMIN_DETAILS,
     STATIC_DIR,
     TAGS_GENERATION_PROMPT_TEMPLATE,
@@ -362,8 +425,8 @@ async def lifespan(app: FastAPI):
     if RESET_CONFIG_ON_START:
         reset_config()
 
-    if app.state.config.LICENSE_KEY:
-        get_license_data(app, app.state.config.LICENSE_KEY)
+    if LICENSE_KEY:
+        get_license_data(app, LICENSE_KEY)
 
     asyncio.create_task(periodic_usage_pool_cleanup())
     yield
@@ -381,7 +444,7 @@ oauth_manager = OAuthManager(app)
 app.state.config = AppConfig()
 
 app.state.WEBUI_NAME = WEBUI_NAME
-app.state.config.LICENSE_KEY = LICENSE_KEY
+app.state.LICENSE_METADATA = None
 
 ########################################
 #
@@ -567,6 +630,7 @@ app.state.config.JINA_API_KEY = JINA_API_KEY
 app.state.config.BING_SEARCH_V7_ENDPOINT = BING_SEARCH_V7_ENDPOINT
 app.state.config.BING_SEARCH_V7_SUBSCRIPTION_KEY = BING_SEARCH_V7_SUBSCRIPTION_KEY
 app.state.config.EXA_API_KEY = EXA_API_KEY
+app.state.config.PERPLEXITY_API_KEY = PERPLEXITY_API_KEY
 
 app.state.config.RAG_WEB_SEARCH_RESULT_COUNT = RAG_WEB_SEARCH_RESULT_COUNT
 app.state.config.RAG_WEB_SEARCH_CONCURRENT_REQUESTS = RAG_WEB_SEARCH_CONCURRENT_REQUESTS
@@ -622,6 +686,7 @@ app.state.EMBEDDING_FUNCTION = get_embedding_function(
 #
 ########################################
 
+app.state.config.ENABLE_CODE_EXECUTION = ENABLE_CODE_EXECUTION
 app.state.config.CODE_EXECUTION_ENGINE = CODE_EXECUTION_ENGINE
 app.state.config.CODE_EXECUTION_JUPYTER_URL = CODE_EXECUTION_JUPYTER_URL
 app.state.config.CODE_EXECUTION_JUPYTER_AUTH = CODE_EXECUTION_JUPYTER_AUTH
@@ -936,7 +1001,7 @@ async def get_models(request: Request, user=Depends(get_verified_user)):
 
 @app.get("/api/models/base")
 async def get_base_models(request: Request, user=Depends(get_admin_user)):
-    models = await get_all_base_models(request)
+    models = await get_all_base_models(request, user=user)
     return {"data": models}
 
 
@@ -983,7 +1048,7 @@ async def chat_completion(
             "files": form_data.get("files", None),
             "features": form_data.get("features", None),
             "variables": form_data.get("variables", None),
-            "model": model_info.model_dump() if model_info else model,
+            "model": model,
             "direct": model_item.get("direct", False),
             **(
                 {"function_calling": "native"}
@@ -1001,7 +1066,7 @@ async def chat_completion(
         form_data["metadata"] = metadata
 
         form_data, metadata, events = await process_chat_payload(
-            request, form_data, metadata, user, model
+            request, form_data, user, metadata, model
         )
 
     except Exception as e:
@@ -1015,7 +1080,7 @@ async def chat_completion(
         response = await chat_completion_handler(request, form_data, user)
 
         return await process_chat_response(
-            request, response, form_data, user, events, metadata, tasks
+            request, response, form_data, user, metadata, model, events, tasks
         )
     except Exception as e:
         raise HTTPException(
@@ -1104,9 +1169,10 @@ async def get_app_config(request: Request):
         if data is not None and "id" in data:
             user = Users.get_user_by_id(data["id"])
 
+    user_count = Users.get_num_users()
     onboarding = False
+
     if user is None:
-        user_count = Users.get_num_users()
         onboarding = user_count == 0
 
     return {
@@ -1134,6 +1200,7 @@ async def get_app_config(request: Request):
                     "enable_direct_connections": app.state.config.ENABLE_DIRECT_CONNECTIONS,
                     "enable_channels": app.state.config.ENABLE_CHANNELS,
                     "enable_web_search": app.state.config.ENABLE_RAG_WEB_SEARCH,
+                    "enable_code_execution": app.state.config.ENABLE_CODE_EXECUTION,
                     "enable_code_interpreter": app.state.config.ENABLE_CODE_INTERPRETER,
                     "enable_image_generation": app.state.config.ENABLE_IMAGE_GENERATION,
                     "enable_autocomplete_generation": app.state.config.ENABLE_AUTOCOMPLETE_GENERATION,
@@ -1152,6 +1219,7 @@ async def get_app_config(request: Request):
             {
                 "default_models": app.state.config.DEFAULT_MODELS,
                 "default_prompt_suggestions": app.state.config.DEFAULT_PROMPT_SUGGESTIONS,
+                "user_count": user_count,
                 "code": {
                     "engine": app.state.config.CODE_EXECUTION_ENGINE,
                 },
@@ -1175,6 +1243,14 @@ async def get_app_config(request: Request):
                     "api_key": GOOGLE_DRIVE_API_KEY.value,
                 },
                 "onedrive": {"client_id": ONEDRIVE_CLIENT_ID.value},
+                "license_metadata": app.state.LICENSE_METADATA,
+                **(
+                    {
+                        "active_entries": app.state.USER_COUNT,
+                    }
+                    if user.role == "admin"
+                    else {}
+                ),
             }
             if user is not None
             else {}
