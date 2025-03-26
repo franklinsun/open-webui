@@ -925,6 +925,7 @@ def process_file(
     request: Request,
     form_data: ProcessFileForm,
     user=Depends(get_verified_user),
+    image_generate=False,
 ):
     try:
         file = Files.get_file_by_id(form_data.file_id)
@@ -1050,7 +1051,10 @@ def process_file(
         file_hash = calculate_sha256_string(text_content)
         Files.update_file_hash_by_id(file.id, file_hash)
 
-        if not request.app.state.config.BYPASS_EMBEDDING_AND_RETRIEVAL:
+        if (
+            not request.app.state.config.BYPASS_EMBEDDING_AND_RETRIEVAL
+            and not image_generate
+        ):
             try:
                 collection_name = (
                     form_data.global_collection_name

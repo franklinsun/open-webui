@@ -459,7 +459,9 @@ def upload_image(request, image_metadata, image_data, content_type, user):
             "content-type": content_type,
         },
     )
-    file_item = upload_file(request, file, user, file_metadata=image_metadata)
+    file_item = upload_file(
+        request, file, user, file_metadata=image_metadata, image_generate=True
+    )
     url = request.app.url_path_for("get_file_content_by_id", id=file_item.id)
     return url
 
@@ -551,6 +553,12 @@ async def image_generations(
             res = r.json()
 
             images = []
+            if not res["candidates"][0].get("content"):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Unable to generate image reason: {res['candidates'][0]}",
+                )
+
             for part in res["candidates"][0]["content"]["parts"]:
                 if part.get("text") is not None:
                     log.error(part["text"])

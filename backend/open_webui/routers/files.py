@@ -69,6 +69,7 @@ def upload_file(
     file: UploadFile = File(...),
     user=Depends(get_verified_user),
     file_metadata: Optional[dict] = None,
+    image_generate=False,
 ):
     if file_metadata is None:
         file_metadata = {}
@@ -133,6 +134,7 @@ def upload_file(
                         global_collection_name=file_metadata.get("collection_name", ""),
                     ),
                     user=user,
+                    image_generate=image_generate,
                 )
             else:
                 process_file(
@@ -142,6 +144,7 @@ def upload_file(
                         global_collection_name=file_metadata.get("collection_name", ""),
                     ),
                     user=user,
+                    image_generate=image_generate,
                 )
 
             file_item = Files.get_file_by_id(id=file_id)
