@@ -12,7 +12,6 @@ import tiktoken
 from fastapi import (
     APIRouter,
     Depends,
-    FastAPI,
     File,
     Form,
     HTTPException,
@@ -62,6 +61,7 @@ from open_webui.retrieval.web.kagi import search_kagi
 # Web search engines
 from open_webui.retrieval.web.main import SearchResult
 from open_webui.retrieval.web.mojeek import search_mojeek
+from open_webui.retrieval.web.perplexity import search_perplexity
 from open_webui.retrieval.web.searchapi import search_searchapi
 from open_webui.retrieval.web.searxng import search_searxng
 from open_webui.retrieval.web.serpapi import search_serpapi
@@ -69,21 +69,7 @@ from open_webui.retrieval.web.serper import search_serper
 from open_webui.retrieval.web.serply import search_serply
 from open_webui.retrieval.web.serpstack import search_serpstack
 from open_webui.retrieval.web.tavily import search_tavily
-from open_webui.retrieval.web.bing import search_bing
-from open_webui.retrieval.web.exa import search_exa
-from open_webui.retrieval.web.perplexity import search_perplexity
-
-from open_webui.retrieval.utils import (
-    get_embedding_function,
-    get_model_path,
-    query_collection,
-    query_collection_with_hybrid_search,
-    query_doc,
-    query_doc_with_hybrid_search,
-)
-from open_webui.utils.misc import (
-    calculate_sha256_string,
-)
+from open_webui.storage.provider import Storage
 from open_webui.utils.auth import get_admin_user, get_verified_user
 from open_webui.utils.misc import calculate_sha256_string
 from pydantic import BaseModel
@@ -1022,6 +1008,7 @@ def process_file(
                     file.meta.get("content_type"),
                     file_path,
                 )
+
                 docs = loader.load(
                     file.filename, file.meta.get("content_type"), file_path
                 )
@@ -1112,7 +1099,7 @@ def process_file(
             }
 
     except Exception as e:
-        log.exception(e)
+        # log.exception(e)
         if "No pandoc was found" in str(e):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,

@@ -727,7 +727,7 @@ async def generate_chat_completion(
             r.raise_for_status()
             return response
     except Exception as e:
-        log.exception(e)
+        # log.exception(e)
 
         detail = None
         if isinstance(response, dict):

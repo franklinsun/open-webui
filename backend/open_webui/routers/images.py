@@ -531,21 +531,18 @@ async def image_generations(
         elif request.app.state.config.IMAGE_GENERATION_ENGINE == "gemini":
             headers = {}
             headers["Content-Type"] = "application/json"
-            headers["x-goog-api-key"] = request.app.state.config.IMAGES_GEMINI_API_KEY
+            headers["X-Goog-Api-Key"] = request.app.state.config.IMAGES_GEMINI_API_KEY
 
             model = get_image_model(request)
             data = {
-                "instances": {"prompt": form_data.prompt},
-                "parameters": {
-                    "sampleCount": form_data.n,
-                    "outputOptions": {"mimeType": "image/png"},
-                },
+                "contents": [{"parts": [{"text": form_data.prompt}]}],
+                "generationConfig": {"responseModalities": ["Text", "Image"]},
             }
 
             # Use asyncio.to_thread for the requests.post call
             r = await asyncio.to_thread(
                 requests.post,
-                url=f"{request.app.state.config.IMAGES_GEMINI_API_BASE_URL}/models/{model}:predict",
+                url=f"{request.app.state.config.IMAGES_GEMINI_API_BASE_URL}/models/{model}:generateContent",
                 json=data,
                 headers=headers,
             )
@@ -554,12 +551,14 @@ async def image_generations(
             res = r.json()
 
             images = []
-            for image in res["predictions"]:
-                image_data, content_type = load_b64_image_data(
-                    image["bytesBase64Encoded"]
-                )
-                url = upload_image(request, data, image_data, content_type, user)
-                images.append({"url": url})
+            for part in res["candidates"][0]["content"]["parts"]:
+                if part.get("text") is not None:
+                    log.error(part["text"])
+                elif part.get("inlineData") is not None:
+                    content_type = part["inlineData"]["mimeType"]
+                    image_data = base64.b64decode(part["inlineData"]["data"])
+                    url = upload_image(request, data, image_data, content_type, user)
+                    images.append({"url": url})
 
             return images
 

@@ -209,6 +209,10 @@ class Loader:
                 loader = UnstructuredPowerPointLoader(file_path)
             elif file_ext == "msg":
                 loader = OutlookMessageLoader(file_path)
+            # elif file_ext in ["jpg", "jpeg", "png", "gif", "bmp", "tiff", "webp"] or (
+            #     file_content_type and file_content_type.startswith("image/")
+            # ):
+            #     loader = TextLoader(file_path, encoding="latin-1")
             elif file_ext in known_source_ext or (
                 file_content_type and file_content_type.find("text/") >= 0
             ):
