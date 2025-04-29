@@ -1,18 +1,36 @@
 import logging
 import os
 import uuid
+from fnmatch import fnmatch
 from pathlib import Path
 from typing import Optional
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    HTTPException,
+    Request,
+    UploadFile,
+    status,
+    Query,
+)
 from fastapi.responses import FileResponse, StreamingResponse
 from open_webui.config import RAG_KNOWLEDGE_URI
 from open_webui.constants import ERROR_MESSAGES
 from open_webui.env import SRC_LOG_LEVELS
-from open_webui.models.files import FileForm, FileModel, FileModelResponse, Files
-from open_webui.routers.audio import transcribe
+from open_webui.models.files import (
+    FileForm,
+    FileModel,
+    FileModelResponse,
+    Files,
+)
+from open_webui.models.knowledge import Knowledges
+
+from open_webui.routers.knowledge import get_knowledge, get_knowledge_list
 from open_webui.routers.retrieval import ProcessFileForm, process_file
+from open_webui.routers.audio import transcribe
 from open_webui.storage.provider import Storage
 from open_webui.utils.auth import get_admin_user, get_verified_user
 from pydantic import BaseModel
@@ -22,6 +40,39 @@ log.setLevel(SRC_LOG_LEVELS["MODELS"])
 
 
 router = APIRouter()
+
+
+############################
+# Check if the current user has access to a file through any knowledge bases the user may be in.
+############################
+
+
+def has_access_to_file(
+    file_id: Optional[str], access_type: str, user=Depends(get_verified_user)
+) -> bool:
+    file = Files.get_file_by_id(file_id)
+    log.debug(f"Checking if user has {access_type} access to file")
+
+    if not file:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+    has_access = False
+    knowledge_base_id = file.meta.get("collection_name") if file.meta else None
+
+    if knowledge_base_id:
+        knowledge_bases = Knowledges.get_knowledge_bases_by_user_id(
+            user.id, access_type
+        )
+        for knowledge_base in knowledge_bases:
+            if knowledge_base.id == knowledge_base_id:
+                has_access = True
+                break
+
+    return has_access
+
 
 ############################
 # Upload File
@@ -68,11 +119,11 @@ def upload_file(
     request: Request,
     file: UploadFile = File(...),
     user=Depends(get_verified_user),
-    file_metadata: Optional[dict] = None,
+    file_metadata: dict = {},
+    process: bool = Query(True),
     image_generate=False,
 ):
-    if file_metadata is None:
-        file_metadata = {}
+    log.info(f"file.content_type: {file.content_type}")
     try:
         file_name = file.filename
         content_type = file.content_type
@@ -95,16 +146,16 @@ def upload_file(
         filename = os.path.basename(unsanitized_filename)
 
         # replace filename with uuid
-        file_id = str(uuid.uuid4())
+        id = str(uuid.uuid4())
         name = filename
-        filename = f"{file_id}_{filename}"
+        filename = f"{id}_{filename}"
         contents, file_path = Storage.upload_file(file.file, filename)
 
         file_item = Files.insert_new_file(
             user.id,
             FileForm(
                 **{
-                    "id": file_id,
+                    "id": id,
                     "filename": name,
                     "path": file_path,
                     "meta": {
@@ -116,47 +167,36 @@ def upload_file(
                 }
             ),
         )
+        if process:
+            try:
+                if content_type in [
+                    "audio/mpeg",
+                    "audio/wav",
+                    "audio/ogg",
+                    "audio/x-m4a",
+                ]:
+                    file_path = Storage.get_file(file_path)
+                    result = transcribe(request, file_path)
 
-        try:
-            if content_type in [
-                "audio/mpeg",
-                "audio/wav",
-                "audio/ogg",
-                "audio/x-m4a",
-            ]:
-                file_path = Storage.get_file(file_path)
-                result = transcribe(request, file_path)
-                process_file(
-                    request,
-                    ProcessFileForm(
-                        file_id=file_id,
-                        content=result.get("text", ""),
-                        global_collection_name=file_metadata.get("collection_name", ""),
-                    ),
-                    user=user,
-                    image_generate=image_generate,
-                )
-            else:
-                process_file(
-                    request,
-                    ProcessFileForm(
-                        file_id=file_id,
-                        global_collection_name=file_metadata.get("collection_name", ""),
-                    ),
-                    user=user,
-                    image_generate=image_generate,
-                )
+                    process_file(
+                        request,
+                        ProcessFileForm(file_id=id, content=result.get("text", ""), global_collection_name=file_metadata.get("collection_name", "")),
+                        user=user,
+                        image_generate=image_generate,
+                    )
+                elif content_type not in ["image/png", "image/jpeg", "image/gif"]:
+                    process_file(request, ProcessFileForm(file_id=id, global_collection_name=file_metadata.get("collection_name", "")), user=user, image_generate=image_generate,)
 
-            file_item = Files.get_file_by_id(id=file_id)
-        except Exception as e:
-            log.exception(e)
-            log.error("Error processing file: %s", file_item.id)
-            file_item = FileModelResponse(
-                **{
-                    **file_item.model_dump(),
-                    "error": str(e.detail) if hasattr(e, "detail") else str(e),
-                }
-            )
+                file_item = Files.get_file_by_id(id=id)
+            except Exception as e:
+                log.exception(e)
+                log.error(f"Error processing file: {file_item.id}")
+                file_item = FileModelResponse(
+                    **{
+                        **file_item.model_dump(),
+                        "error": str(e.detail) if hasattr(e, "detail") else str(e),
+                    }
+                )
 
         if file_item:
             return file_item
@@ -171,7 +211,7 @@ def upload_file(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=ERROR_MESSAGES.DEFAULT(e),
-        ) from e
+        )
 
 
 ############################
@@ -180,12 +220,58 @@ def upload_file(
 
 
 @router.get("/", response_model=list[FileModelResponse])
-async def list_files(user=Depends(get_verified_user)):
+async def list_files(user=Depends(get_verified_user), content: bool = Query(True)):
     if user.role == "admin":
         files = Files.get_files()
     else:
         files = Files.get_files_by_user_id(user.id)
+
+    if not content:
+        for file in files:
+            del file.data["content"]
+
     return files
+
+
+############################
+# Search Files
+############################
+
+
+@router.get("/search", response_model=list[FileModelResponse])
+async def search_files(
+    filename: str = Query(
+        ...,
+        description="Filename pattern to search for. Supports wildcards such as '*.txt'",
+    ),
+    content: bool = Query(True),
+    user=Depends(get_verified_user),
+):
+    """
+    Search for files by filename with support for wildcard patterns.
+    """
+    # Get files according to user role
+    if user.role == "admin":
+        files = Files.get_files()
+    else:
+        files = Files.get_files_by_user_id(user.id)
+
+    # Get matching files
+    matching_files = [
+        file for file in files if fnmatch(file.filename.lower(), filename.lower())
+    ]
+
+    if not matching_files:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No files found matching the pattern.",
+        )
+
+    if not content:
+        for file in matching_files:
+            del file.data["content"]
+
+    return matching_files
 
 
 ############################
@@ -223,7 +309,17 @@ async def delete_all_files(user=Depends(get_admin_user)):
 async def get_file_by_id(id: str, user=Depends(get_verified_user)):
     file = Files.get_file_by_id(id)
 
-    if file and (file.user_id == user.id or user.role == "admin"):
+    if not file:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+    if (
+        file.user_id == user.id
+        or user.role == "admin"
+        or has_access_to_file(id, "read", user)
+    ):
         return file
     else:
         raise HTTPException(
@@ -241,7 +337,17 @@ async def get_file_by_id(id: str, user=Depends(get_verified_user)):
 async def get_file_data_content_by_id(id: str, user=Depends(get_verified_user)):
     file = Files.get_file_by_id(id)
 
-    if file and (file.user_id == user.id or user.role == "admin"):
+    if not file:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+    if (
+        file.user_id == user.id
+        or user.role == "admin"
+        or has_access_to_file(id, "read", user)
+    ):
         return {"content": file.data.get("content", "")}
     else:
         raise HTTPException(
@@ -265,7 +371,17 @@ async def update_file_data_content_by_id(
 ):
     file = Files.get_file_by_id(id)
 
-    if file and (file.user_id == user.id or user.role == "admin"):
+    if not file:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+    if (
+        file.user_id == user.id
+        or user.role == "admin"
+        or has_access_to_file(id, "write", user)
+    ):
         try:
             process_file(
                 request,
@@ -291,9 +407,22 @@ async def update_file_data_content_by_id(
 
 
 @router.get("/{id}/content")
-async def get_file_content_by_id(id: str, user=Depends(get_verified_user)):
+async def get_file_content_by_id(
+    id: str, user=Depends(get_verified_user), attachment: bool = Query(False)
+):
     file = Files.get_file_by_id(id)
-    if file and (file.user_id == user.id or user.role == "admin"):
+
+    if not file:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+    if (
+        file.user_id == user.id
+        or user.role == "admin"
+        or has_access_to_file(id, "read", user)
+    ):
         try:
             file_path = Storage.get_file(file.path)
             file_path = Path(file_path)
@@ -309,17 +438,22 @@ async def get_file_content_by_id(id: str, user=Depends(get_verified_user)):
                 encoded_filename = quote(filename)
                 headers = {}
 
-                if content_type == "application/pdf" or filename.lower().endswith(
-                    ".pdf"
-                ):
-                    headers["Content-Disposition"] = (
-                        f"inline; filename*=UTF-8''{encoded_filename}"
-                    )
-                    content_type = "application/pdf"
-                elif content_type != "text/plain":
+                if attachment:
                     headers["Content-Disposition"] = (
                         f"attachment; filename*=UTF-8''{encoded_filename}"
                     )
+                else:
+                    if content_type == "application/pdf" or filename.lower().endswith(
+                        ".pdf"
+                    ):
+                        headers["Content-Disposition"] = (
+                            f"inline; filename*=UTF-8''{encoded_filename}"
+                        )
+                        content_type = "application/pdf"
+                    elif content_type != "text/plain":
+                        headers["Content-Disposition"] = (
+                            f"attachment; filename*=UTF-8''{encoded_filename}"
+                        )
 
                 return FileResponse(file_path, headers=headers, media_type=content_type)
 
@@ -345,7 +479,18 @@ async def get_file_content_by_id(id: str, user=Depends(get_verified_user)):
 @router.get("/{id}/content/html")
 async def get_html_file_content_by_id(id: str, user=Depends(get_verified_user)):
     file = Files.get_file_by_id(id)
-    if file and (file.user_id == user.id or user.role == "admin"):
+
+    if not file:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+    if (
+        file.user_id == user.id
+        or user.role == "admin"
+        or has_access_to_file(id, "read", user)
+    ):
         try:
             file_path = Storage.get_file(file.path)
             file_path = Path(file_path)
@@ -377,7 +522,17 @@ async def get_html_file_content_by_id(id: str, user=Depends(get_verified_user)):
 async def get_file_content_by_id(id: str, user=Depends(get_verified_user)):
     file = Files.get_file_by_id(id)
 
-    if file and (file.user_id == user.id or user.role == "admin"):
+    if not file:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+    if (
+        file.user_id == user.id
+        or user.role == "admin"
+        or has_access_to_file(id, "read", user)
+    ):
         file_path = file.path
 
         # Handle Unicode filenames
@@ -428,7 +583,18 @@ async def get_file_content_by_id(id: str, user=Depends(get_verified_user)):
 @router.delete("/{id}")
 async def delete_file_by_id(id: str, user=Depends(get_verified_user)):
     file = Files.get_file_by_id(id)
-    if file and (file.user_id == user.id or user.role == "admin"):
+
+    if not file:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+    if (
+        file.user_id == user.id
+        or user.role == "admin"
+        or has_access_to_file(id, "write", user)
+    ):
         # We should add Chroma cleanup here
 
         result = Files.delete_file_by_id(id)

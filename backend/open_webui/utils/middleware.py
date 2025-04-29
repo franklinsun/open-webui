@@ -1,81 +1,96 @@
-import ast
-import asyncio
+import time
+import logging
+import sys
+import os
 import base64
+
+import asyncio
+from aiocache import cached
+from typing import Any, Optional
+import random
+import json
 import html
 import inspect
-import json
-import logging
-import os
-import random
 import re
-import sys
-import time
-from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Optional
-from uuid import uuid4
+import ast
 
-from aiocache import cached
-from fastapi import BackgroundTasks, Request
-from open_webui.config import (
-    CACHE_DIR,
-    DEFAULT_CODE_INTERPRETER_PROMPT,
-    DEFAULT_TOOLS_FUNCTION_CALLING_PROMPT_TEMPLATE,
-)
-from open_webui.constants import TASKS
-from open_webui.env import (
-    BYPASS_MODEL_ACCESS_CONTROL,
-    ENABLE_REALTIME_CHAT_SAVE,
-    GLOBAL_LOG_LEVEL,
-    SRC_LOG_LEVELS,
-)
+from uuid import uuid4
+from concurrent.futures import ThreadPoolExecutor
+
+
+from fastapi import Request, HTTPException
+from starlette.responses import Response, StreamingResponse
+
+
 from open_webui.models.chats import Chats
-from open_webui.models.functions import Functions
-from open_webui.models.models import Models
-from open_webui.models.users import UserModel, Users
-from open_webui.retrieval.utils import (
-    get_sources_from_files,
-    get_sources_from_global_rag,
+from open_webui.models.users import Users
+from open_webui.socket.main import (
+    get_event_call,
+    get_event_emitter,
+    get_active_status_by_user_id,
 )
-from open_webui.routers.images import GenerateImageForm, image_generations
+from open_webui.routers.tasks import (
+    generate_queries,
+    generate_title,
+    generate_image_prompt,
+    generate_chat_tags,
+)
+from open_webui.routers.retrieval import process_web_search, SearchForm
+from open_webui.routers.images import image_generations, GenerateImageForm
 from open_webui.routers.pipelines import (
     process_pipeline_inlet_filter,
     process_pipeline_outlet_filter,
 )
-from open_webui.routers.retrieval import SearchForm, process_web_search
-from open_webui.routers.tasks import (
-    generate_chat_tags,
-    generate_image_prompt,
-    generate_queries,
-    generate_title,
-)
-from open_webui.socket.main import (
-    get_active_status_by_user_id,
-    get_event_call,
-    get_event_emitter,
-)
-from open_webui.tasks import create_task
+
+from open_webui.utils.webhook import post_webhook
+
+
+from open_webui.models.users import UserModel
+from open_webui.models.functions import Functions
+from open_webui.models.models import Models
+
+from open_webui.retrieval.utils import get_sources_from_files
+
+
 from open_webui.utils.chat import generate_chat_completion
-from open_webui.utils.code_interpreter import execute_code_jupyter
-from open_webui.utils.filter import get_sorted_filter_ids, process_filter_functions
-from open_webui.utils.misc import (
-    add_or_update_system_message,
-    add_or_update_user_message,
-    deep_update,
-    get_last_assistant_message,
-    get_last_user_message,
-    get_message_list,
-    prepend_to_first_user_message_content,
-    convert_logit_bias_input_to_json,
-)
-from open_webui.utils.plugin import load_function_module_by_id
 from open_webui.utils.task import (
     get_task_model_id,
     rag_template,
     tools_function_calling_generation_template,
 )
+from open_webui.utils.misc import (
+    deep_update,
+    get_message_list,
+    add_or_update_system_message,
+    add_or_update_user_message,
+    get_last_user_message,
+    get_last_assistant_message,
+    prepend_to_first_user_message_content,
+    convert_logit_bias_input_to_json,
+)
 from open_webui.utils.tools import get_tools
-from open_webui.utils.webhook import post_webhook
-from starlette.responses import Response, StreamingResponse
+from open_webui.utils.plugin import load_function_module_by_id
+from open_webui.utils.filter import (
+    get_sorted_filter_ids,
+    process_filter_functions,
+)
+from open_webui.utils.code_interpreter import execute_code_jupyter
+
+from open_webui.tasks import create_task
+
+from open_webui.config import (
+    CACHE_DIR,
+    DEFAULT_TOOLS_FUNCTION_CALLING_PROMPT_TEMPLATE,
+    DEFAULT_CODE_INTERPRETER_PROMPT,
+)
+from open_webui.env import (
+    SRC_LOG_LEVELS,
+    GLOBAL_LOG_LEVEL,
+    BYPASS_MODEL_ACCESS_CONTROL,
+    ENABLE_REALTIME_CHAT_SAVE,
+)
+from open_webui.constants import TASKS
+
 
 logging.basicConfig(stream=sys.stdout, level=GLOBAL_LOG_LEVEL)
 log = logging.getLogger(__name__)
@@ -83,7 +98,7 @@ log.setLevel(SRC_LOG_LEVELS["MAIN"])
 
 
 async def chat_completion_tools_handler(
-    request: Request, body: dict, user: UserModel, models, tools
+    request: Request, body: dict, extra_params: dict, user: UserModel, models, tools
 ) -> tuple[dict, dict]:
     async def get_content_from_response(response) -> Optional[str]:
         content = None
@@ -118,6 +133,9 @@ async def chat_completion_tools_handler(
             "metadata": {"task": str(TASKS.FUNCTION_CALLING)},
         }
 
+    event_caller = extra_params["__event_call__"]
+    metadata = extra_params["__metadata__"]
+
     task_model_id = get_task_model_id(
         body["model"],
         request.app.state.config.TASK_MODEL,
@@ -139,7 +157,6 @@ async def chat_completion_tools_handler(
     tools_function_calling_prompt = tools_function_calling_generation_template(
         template, tools_specs
     )
-    log.info(f"{tools_function_calling_prompt=}")
     payload = get_tools_function_calling_payload(
         body["messages"], task_model_id, tools_function_calling_prompt
     )
@@ -156,7 +173,7 @@ async def chat_completion_tools_handler(
         try:
             content = content[content.find("{") : content.rfind("}") + 1]
             if not content:
-                raise ValueError("No JSON object found in the response")
+                raise Exception("No JSON object found in the response")
 
             result = json.loads(content)
 
@@ -172,52 +189,83 @@ async def chat_completion_tools_handler(
                 tool_function_params = tool_call.get("parameters", {})
 
                 try:
-                    required_params = (
-                        tools[tool_function_name]
-                        .get("spec", {})
-                        .get("parameters", {})
-                        .get("required", [])
+                    tool = tools[tool_function_name]
+
+                    spec = tool.get("spec", {})
+                    allowed_params = (
+                        spec.get("parameters", {}).get("properties", {}).keys()
                     )
-                    tool_function = tools[tool_function_name]["callable"]
                     tool_function_params = {
                         k: v
                         for k, v in tool_function_params.items()
-                        if k in required_params
+                        if k in allowed_params
                     }
-                    tool_output = await tool_function(**tool_function_params)
 
-                except Exception as e:
-                    tool_output = str(e)
-
-                if isinstance(tool_output, str):
-                    if tools[tool_function_name]["citation"]:
-                        sources.append(
+                    if tool.get("direct", False):
+                        tool_result = await event_caller(
                             {
-                                "source": {
-                                    "name": f"TOOL:{tools[tool_function_name]['toolkit_id']}/{tool_function_name}"
+                                "type": "execute:tool",
+                                "data": {
+                                    "id": str(uuid4()),
+                                    "name": tool_function_name,
+                                    "params": tool_function_params,
+                                    "server": tool.get("server", {}),
+                                    "session_id": metadata.get("session_id", None),
                                 },
-                                "document": [tool_output],
-                                "metadata": [
-                                    {
-                                        "source": f"TOOL:{tools[tool_function_name]['toolkit_id']}/{tool_function_name}"
-                                    }
-                                ],
                             }
                         )
                     else:
+                        tool_function = tool["callable"]
+                        tool_result = await tool_function(**tool_function_params)
+
+                except Exception as e:
+                    tool_result = str(e)
+
+                tool_result_files = []
+                if isinstance(tool_result, list):
+                    for item in tool_result:
+                        # check if string
+                        if isinstance(item, str) and item.startswith("data:"):
+                            tool_result_files.append(item)
+                            tool_result.remove(item)
+
+                if isinstance(tool_result, dict) or isinstance(tool_result, list):
+                    tool_result = json.dumps(tool_result, indent=2)
+
+                if isinstance(tool_result, str):
+                    tool = tools[tool_function_name]
+                    tool_id = tool.get("tool_id", "")
+
+                    tool_name = (
+                        f"{tool_id}/{tool_function_name}"
+                        if tool_id
+                        else f"{tool_function_name}"
+                    )
+                    if tool.get("metadata", {}).get("citation", False) or tool.get(
+                        "direct", False
+                    ):
+                        # Citation is enabled for this tool
                         sources.append(
                             {
-                                "source": {},
-                                "document": [tool_output],
-                                "metadata": [
-                                    {
-                                        "source": f"TOOL:{tools[tool_function_name]['toolkit_id']}/{tool_function_name}"
-                                    }
-                                ],
+                                "source": {
+                                    "name": (f"TOOL:{tool_name}"),
+                                },
+                                "document": [tool_result],
+                                "metadata": [{"source": (f"TOOL:{tool_name}")}],
                             }
                         )
+                    else:
+                        # Citation is not enabled for this tool
+                        body["messages"] = add_or_update_user_message(
+                            f"\nTool `{tool_name}` Output: {tool_result}",
+                            body["messages"],
+                        )
 
-                    if tools[tool_function_name]["file_handler"]:
+                    if (
+                        tools[tool_function_name]
+                        .get("metadata", {})
+                        .get("file_handler", False)
+                    ):
                         skip_files = True
 
             # check if "tool_calls" in result
@@ -228,10 +276,10 @@ async def chat_completion_tools_handler(
                 await tool_call_handler(result)
 
         except Exception as e:
-            log.exception(f"Error: {e}")
+            log.debug(f"Error: {e}")
             content = None
     except Exception as e:
-        log.exception(f"Error: {e}")
+        log.debug(f"Error: {e}")
         content = None
 
     log.debug(f"tool_contexts: {sources}")
@@ -280,14 +328,11 @@ async def chat_web_search_handler(
             bracket_end = response.rfind("}") + 1
 
             if bracket_start == -1 or bracket_end == -1:
-                raise ValueError("No JSON object found in the response")
+                raise Exception("No JSON object found in the response")
 
             response = response[bracket_start:bracket_end]
             queries = json.loads(response)
-            if isinstance(queries, dict):
-                queries = queries.get("queries", [])
-            else:
-                queries = []
+            queries = queries.get("queries", [])
         except Exception as e:
             queries = [response]
 
@@ -338,24 +383,44 @@ async def chat_web_search_handler(
                 all_results.append(results)
                 files = form_data.get("files", [])
 
-                if results.get("collection_name"):
-                    files.append(
-                        {
-                            "collection_name": results["collection_name"],
-                            "name": searchQuery,
-                            "type": "web_search",
-                            "urls": results["filenames"],
-                        }
-                    )
+                if results.get("collection_names"):
+                    for col_idx, collection_name in enumerate(
+                        results.get("collection_names")
+                    ):
+                        files.append(
+                            {
+                                "collection_name": collection_name,
+                                "name": searchQuery,
+                                "type": "web_search",
+                                "urls": [results["filenames"][col_idx]],
+                            }
+                        )
                 elif results.get("docs"):
-                    files.append(
-                        {
-                            "docs": results.get("docs", []),
-                            "name": searchQuery,
-                            "type": "web_search",
-                            "urls": results["filenames"],
-                        }
-                    )
+                    # Invoked when bypass embedding and retrieval is set to True
+                    docs = results["docs"]
+
+                    if len(docs) == len(results["filenames"]):
+                        # the number of docs and filenames (urls) should be the same
+                        for doc_idx, doc in enumerate(docs):
+                            files.append(
+                                {
+                                    "docs": [doc],
+                                    "name": searchQuery,
+                                    "type": "web_search",
+                                    "urls": [results["filenames"][doc_idx]],
+                                }
+                            )
+                    else:
+                        # edge case when the number of docs and filenames (urls) are not the same
+                        # this should not happen, but if it does, we will just append the docs
+                        files.append(
+                            {
+                                "docs": results.get("docs", []),
+                                "name": searchQuery,
+                                "type": "web_search",
+                                "urls": results["filenames"],
+                            }
+                        )
 
                 form_data["files"] = files
         except Exception as e:
@@ -441,7 +506,7 @@ async def chat_image_generation_handler(
                 bracket_end = response.rfind("}") + 1
 
                 if bracket_start == -1 or bracket_end == -1:
-                    raise ValueError("No JSON object found in the response")
+                    raise Exception("No JSON object found in the response")
 
                 response = response[bracket_start:bracket_end]
                 response = json.loads(response)
@@ -469,13 +534,20 @@ async def chat_image_generation_handler(
             }
         )
 
-        for image in images:
-            await __event_emitter__(
-                {
-                    "type": "message",
-                    "data": {"content": f"![Generated Image]({image['url']})\n"},
-                }
-            )
+        await __event_emitter__(
+            {
+                "type": "files",
+                "data": {
+                    "files": [
+                        {
+                            "type": "image",
+                            "url": image["url"],
+                        }
+                        for image in images
+                    ]
+                },
+            }
+        )
 
         system_message_content = "<context>User is shown the generated image, tell the user that the image has been generated</context>"
     except Exception as e:
@@ -504,39 +576,40 @@ async def chat_completion_files_handler(
     request: Request, body: dict, user: UserModel
 ) -> tuple[dict, dict[str, list]]:
     sources = []
-    queries = []
-    try:
-        queries_response = await generate_queries(
-            request,
-            {
-                "model": body["model"],
-                "messages": body["messages"],
-                "type": "retrieval",
-            },
-            user,
-        )
-        queries_response = queries_response["choices"][0]["message"]["content"]
-
-        try:
-            bracket_start = queries_response.find("{")
-            bracket_end = queries_response.rfind("}") + 1
-
-            if bracket_start == -1 or bracket_end == -1:
-                raise ValueError("No JSON object found in the response")
-
-            queries_response = queries_response[bracket_start:bracket_end]
-            queries_response = json.loads(queries_response)
-        except Exception as e:
-            queries_response = {"queries": [queries_response]}
-
-        queries = queries_response.get("queries", [])
-    except Exception:
-        pass
-
-    if len(queries) == 0:
-        queries = [get_last_user_message(body["messages"])]
 
     if files := body.get("metadata", {}).get("files", None):
+        queries = []
+        try:
+            queries_response = await generate_queries(
+                request,
+                {
+                    "model": body["model"],
+                    "messages": body["messages"],
+                    "type": "retrieval",
+                },
+                user,
+            )
+            queries_response = queries_response["choices"][0]["message"]["content"]
+
+            try:
+                bracket_start = queries_response.find("{")
+                bracket_end = queries_response.rfind("}") + 1
+
+                if bracket_start == -1 or bracket_end == -1:
+                    raise Exception("No JSON object found in the response")
+
+                queries_response = queries_response[bracket_start:bracket_end]
+                queries_response = json.loads(queries_response)
+            except Exception as e:
+                queries_response = {"queries": [queries_response]}
+
+            queries = queries_response.get("queries", [])
+        except:
+            pass
+
+        if len(queries) == 0:
+            queries = [get_last_user_message(body["messages"])]
+
         try:
             # Offload get_sources_from_files to a separate thread
             loop = asyncio.get_running_loop()
@@ -547,11 +620,12 @@ async def chat_completion_files_handler(
                         request=request,
                         files=files,
                         queries=queries,
-                        embedding_function=lambda query: request.app.state.EMBEDDING_FUNCTION(
-                            query, user=user
+                        embedding_function=lambda query, prefix: request.app.state.EMBEDDING_FUNCTION(
+                            query, prefix=prefix, user=user
                         ),
                         k=request.app.state.config.TOP_K,
                         reranking_function=request.app.state.rf,
+                        k_reranker=request.app.state.config.TOP_K_RERANKER,
                         r=request.app.state.config.RELEVANCE_THRESHOLD,
                         hybrid_search=request.app.state.config.ENABLE_RAG_HYBRID_SEARCH,
                         full_context=request.app.state.config.RAG_FULL_CONTEXT,
@@ -560,26 +634,26 @@ async def chat_completion_files_handler(
         except Exception as e:
             log.exception(e)
 
-    if request.app.state.config.USE_GLOBAL_RAG:
-        collection_names = [
-            name.strip() for name in request.app.state.config.COLLECTION_NAME.split(",")
-        ]
-        sources.extend(
-            get_sources_from_global_rag(
-                collection_names=collection_names,
-                queries=queries,
-                embedding_function=lambda query: request.app.state.EMBEDDING_FUNCTION(
-                    query, user=user
-                ),
-                k=request.app.state.config.TOP_K,
-                reranking_function=request.app.state.rf,
-                r=request.app.state.config.RELEVANCE_THRESHOLD,
-                hybrid_search=request.app.state.config.ENABLE_RAG_HYBRID_SEARCH,
-                full_context=request.app.state.config.RAG_FULL_CONTEXT,
+        if request.app.state.config.USE_GLOBAL_RAG:
+            collection_names = [
+                name.strip() for name in request.app.state.config.COLLECTION_NAME.split(",")
+            ]
+            sources.extend(
+                get_sources_from_global_rag(
+                    collection_names=collection_names,
+                    queries=queries,
+                    embedding_function=lambda query: request.app.state.EMBEDDING_FUNCTION(
+                        query, user=user
+                    ),
+                    k=request.app.state.config.TOP_K,
+                    reranking_function=request.app.state.rf,
+                    r=request.app.state.config.RELEVANCE_THRESHOLD,
+                    hybrid_search=request.app.state.config.ENABLE_RAG_HYBRID_SEARCH,
+                    full_context=request.app.state.config.RAG_FULL_CONTEXT,
+                )
             )
-        )
 
-    log.debug("rag_contexts:sources: %s", sources)
+        log.debug(f"rag_contexts:sources: {sources}")
 
     return body, {"sources": sources}
 
@@ -595,27 +669,28 @@ def apply_params_to_form_data(form_data, model):
         if "keep_alive" in params:
             form_data["keep_alive"] = params["keep_alive"]
     else:
-        if "seed" in params:
+        if "seed" in params and params["seed"] is not None:
             form_data["seed"] = params["seed"]
 
-        if "stop" in params:
+        if "stop" in params and params["stop"] is not None:
             form_data["stop"] = params["stop"]
 
-        if "temperature" in params:
+        if "temperature" in params and params["temperature"] is not None:
             form_data["temperature"] = params["temperature"]
 
-        if "max_tokens" in params:
+        if "max_tokens" in params and params["max_tokens"] is not None:
             form_data["max_tokens"] = params["max_tokens"]
 
-        if "top_p" in params:
+        if "top_p" in params and params["top_p"] is not None:
             form_data["top_p"] = params["top_p"]
 
-        if "frequency_penalty" in params:
+        if "frequency_penalty" in params and params["frequency_penalty"] is not None:
             form_data["frequency_penalty"] = params["frequency_penalty"]
 
-        if "reasoning_effort" in params:
+        if "reasoning_effort" in params and params["reasoning_effort"] is not None:
             form_data["reasoning_effort"] = params["reasoning_effort"]
-        if "logit_bias" in params:
+
+        if "logit_bias" in params and params["logit_bias"] is not None:
             try:
                 form_data["logit_bias"] = json.loads(
                     convert_logit_bias_input_to_json(params["logit_bias"])
@@ -629,13 +704,7 @@ def apply_params_to_form_data(form_data, model):
 async def process_chat_payload(request, form_data, user, metadata, model):
 
     form_data = apply_params_to_form_data(form_data, model)
-    log.debug(
-        "form_data: %s, metadata: %s, user: %s, model: %s",
-        form_data,
-        metadata,
-        user,
-        model,
-    )
+    log.debug(f"form_data: {form_data}")
 
     event_emitter = get_event_emitter(metadata)
     event_call = get_event_call(metadata)
@@ -776,12 +845,18 @@ async def process_chat_payload(request, form_data, user, metadata, model):
     }
     form_data["metadata"] = metadata
 
+    # Server side tools
     tool_ids = metadata.get("tool_ids", None)
+    # Client side tools
+    tool_servers = metadata.get("tool_servers", None)
+
     log.debug(f"{tool_ids=}")
+    log.debug(f"{tool_servers=}")
+
+    tools_dict = {}
 
     if tool_ids:
-        # If tool_ids field is present, then get the tools
-        tools = get_tools(
+        tools_dict = get_tools(
             request,
             tool_ids,
             user,
@@ -792,20 +867,31 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                 "__files__": metadata.get("files", []),
             },
         )
-        log.info(f"{tools=}")
 
+    if tool_servers:
+        for tool_server in tool_servers:
+            tool_specs = tool_server.pop("specs", [])
+
+            for tool in tool_specs:
+                tools_dict[tool["name"]] = {
+                    "spec": tool,
+                    "direct": True,
+                    "server": tool_server,
+                }
+
+    if tools_dict:
         if metadata.get("function_calling") == "native":
             # If the function calling is native, then call the tools function calling handler
-            metadata["tools"] = tools
+            metadata["tools"] = tools_dict
             form_data["tools"] = [
                 {"type": "function", "function": tool.get("spec", {})}
-                for tool in tools.values()
+                for tool in tools_dict.values()
             ]
         else:
             # If the function calling is not native, then call the tools function calling handler
             try:
                 form_data, flags = await chat_completion_tools_handler(
-                    request, form_data, user, models, tools
+                    request, form_data, extra_params, user, models, tools_dict
                 )
                 sources.extend(flags.get("sources", []))
 
@@ -819,25 +905,30 @@ async def process_chat_payload(request, form_data, user, metadata, model):
         log.exception(e)
 
     # If context is not empty, insert it into the messages
-
     if len(sources) > 0:
         context_string = ""
-        for source_idx, source in enumerate(sources):
+        citated_file_idx = {}
+        for _, source in enumerate(sources, 1):
             if "document" in source:
-                for doc_idx, doc_context in enumerate(source["document"]):
-                    context_string += f"<source><source_id>{source_idx}</source_id><source_context>{doc_context}</source_context></source>\n"
+                for doc_context, doc_meta in zip(
+                    source["document"], source["metadata"]
+                ):
+                    file_id = doc_meta.get("file_id")
+                    if file_id not in citated_file_idx:
+                        citated_file_idx[file_id] = len(citated_file_idx) + 1
+                    context_string += f'<source id="{citated_file_idx[file_id]}">{doc_context}</source>\n'
 
         context_string = context_string.strip()
         prompt = get_last_user_message(form_data["messages"])
-        # log.info("context_string: %s", context_string)
+
         if prompt is None:
-            raise ValueError("No user message found")
+            raise Exception("No user message found")
         if (
             request.app.state.config.RELEVANCE_THRESHOLD == 0
             and context_string.strip() == ""
         ):
             log.debug(
-                "With a 0 relevancy threshold for RAG, the context cannot be empty"
+                f"With a 0 relevancy threshold for RAG, the context cannot be empty"
             )
 
         # Workaround for Ollama 2.0+ system prompt issue
@@ -1002,6 +1093,16 @@ async def process_chat_response(
     # Non-streaming response
     if not isinstance(response, StreamingResponse):
         if event_emitter:
+            if "error" in response:
+                error = response["error"].get("detail", response["error"])
+                Chats.upsert_message_to_chat_by_id_and_message_id(
+                    metadata["chat_id"],
+                    metadata["message_id"],
+                    {
+                        "error": {"content": error},
+                    },
+                )
+
             if "selected_model_id" in response:
                 Chats.upsert_message_to_chat_by_id_and_message_id(
                     metadata["chat_id"],
@@ -1011,7 +1112,8 @@ async def process_chat_response(
                     },
                 )
 
-            if response.get("choices", [])[0].get("message", {}).get("content"):
+            choices = response.get("choices", [])
+            if choices and choices[0].get("message", {}).get("content"):
                 content = response["choices"][0]["message"]["content"]
 
                 if content:
@@ -1092,8 +1194,6 @@ async def process_chat_response(
         for filter_id in get_sorted_filter_ids(model)
     ]
 
-    print(f"{filter_functions=}")
-
     # Streaming response
     if event_emitter and event_caller:
         task_id = str(uuid4())  # Create a unique task ID.
@@ -1132,36 +1232,53 @@ async def process_chat_response(
                     elif block["type"] == "tool_calls":
                         attributes = block.get("attributes", {})
 
-                        block_content = block.get("content", [])
+                        tool_calls = block.get("content", [])
                         results = block.get("results", [])
 
                         if results:
 
-                            result_display_content = ""
+                            tool_calls_display_content = ""
+                            for tool_call in tool_calls:
 
-                            for result in results:
-                                tool_call_id = result.get("tool_call_id", "")
-                                tool_name = ""
+                                tool_call_id = tool_call.get("id", "")
+                                tool_name = tool_call.get("function", {}).get(
+                                    "name", ""
+                                )
+                                tool_arguments = tool_call.get("function", {}).get(
+                                    "arguments", ""
+                                )
 
-                                for tool_call in block_content:
-                                    if tool_call.get("id", "") == tool_call_id:
-                                        tool_name = tool_call.get("function", {}).get(
-                                            "name", ""
-                                        )
+                                tool_result = None
+                                tool_result_files = None
+                                for result in results:
+                                    if tool_call_id == result.get("tool_call_id", ""):
+                                        tool_result = result.get("content", None)
+                                        tool_result_files = result.get("files", None)
                                         break
 
-                                result_display_content = f"{result_display_content}\n> {tool_name}: {result.get('content', '')}"
+                                if tool_result:
+                                    tool_calls_display_content = f'{tool_calls_display_content}\n<details type="tool_calls" done="true" id="{tool_call_id}" name="{tool_name}" arguments="{html.escape(json.dumps(tool_arguments))}" result="{html.escape(json.dumps(tool_result))}" files="{html.escape(json.dumps(tool_result_files)) if tool_result_files else ""}">\n<summary>Tool Executed</summary>\n</details>\n'
+                                else:
+                                    tool_calls_display_content = f'{tool_calls_display_content}\n<details type="tool_calls" done="false" id="{tool_call_id}" name="{tool_name}" arguments="{html.escape(json.dumps(tool_arguments))}">\n<summary>Executing...</summary>\n</details>'
 
                             if not raw:
-                                content = f'{content}\n<details type="tool_calls" done="true" content="{html.escape(json.dumps(block_content))}" results="{html.escape(json.dumps(results))}">\n<summary>Tool Executed</summary>\n{result_display_content}\n</details>\n'
+                                content = f"{content}\n{tool_calls_display_content}\n\n"
                         else:
                             tool_calls_display_content = ""
 
-                            for tool_call in block_content:
-                                tool_calls_display_content = f"{tool_calls_display_content}\n> Executing {tool_call.get('function', {}).get('name', '')}"
+                            for tool_call in tool_calls:
+                                tool_call_id = tool_call.get("id", "")
+                                tool_name = tool_call.get("function", {}).get(
+                                    "name", ""
+                                )
+                                tool_arguments = tool_call.get("function", {}).get(
+                                    "arguments", ""
+                                )
+
+                                tool_calls_display_content = f'{tool_calls_display_content}\n<details type="tool_calls" done="false" id="{tool_call_id}" name="{tool_name}" arguments="{html.escape(json.dumps(tool_arguments))}">\n<summary>Executing...</summary>\n</details>'
 
                             if not raw:
-                                content = f'{content}\n<details type="tool_calls" done="false" content="{html.escape(json.dumps(block_content))}">\n<summary>Tool Executing...</summary>\n{tool_calls_display_content}\n</details>\n'
+                                content = f"{content}\n{tool_calls_display_content}\n\n"
 
                     elif block["type"] == "reasoning":
                         reasoning_display_content = "\n".join(
@@ -1506,6 +1623,9 @@ async def process_chat_response(
                             )
 
                             if data:
+                                if "event" in data:
+                                    await event_emitter(data.get("event", {}))
+
                                 if "selected_model_id" in data:
                                     model_id = data["selected_model_id"]
                                     Chats.upsert_message_to_chat_by_id_and_message_id(
@@ -1518,6 +1638,16 @@ async def process_chat_response(
                                 else:
                                     choices = data.get("choices", [])
                                     if not choices:
+                                        error = data.get("error", {})
+                                        if error:
+                                            await event_emitter(
+                                                {
+                                                    "type": "chat:completion",
+                                                    "data": {
+                                                        "error": error,
+                                                    },
+                                                }
+                                            )
                                         usage = data.get("usage", {})
                                         if usage:
                                             await event_emitter(
@@ -1540,14 +1670,27 @@ async def process_chat_response(
                                             )
 
                                             if tool_call_index is not None:
-                                                if (
-                                                    len(response_tool_calls)
-                                                    <= tool_call_index
-                                                ):
+                                                # Check if the tool call already exists
+                                                current_response_tool_call = None
+                                                for (
+                                                    response_tool_call
+                                                ) in response_tool_calls:
+                                                    if (
+                                                        response_tool_call.get("index")
+                                                        == tool_call_index
+                                                    ):
+                                                        current_response_tool_call = (
+                                                            response_tool_call
+                                                        )
+                                                        break
+
+                                                if current_response_tool_call is None:
+                                                    # Add the new tool call
                                                     response_tool_calls.append(
                                                         delta_tool_call
                                                     )
                                                 else:
+                                                    # Update the existing tool call
                                                     delta_name = delta_tool_call.get(
                                                         "function", {}
                                                     ).get("name")
@@ -1558,22 +1701,22 @@ async def process_chat_response(
                                                     )
 
                                                     if delta_name:
-                                                        response_tool_calls[
-                                                            tool_call_index
-                                                        ]["function"][
-                                                            "name"
-                                                        ] += delta_name
+                                                        current_response_tool_call[
+                                                            "function"
+                                                        ]["name"] += delta_name
 
                                                     if delta_arguments:
-                                                        response_tool_calls[
-                                                            tool_call_index
-                                                        ]["function"][
+                                                        current_response_tool_call[
+                                                            "function"
+                                                        ][
                                                             "arguments"
                                                         ] += delta_arguments
 
                                     value = delta.get("content")
 
-                                    reasoning_content = delta.get("reasoning_content")
+                                    reasoning_content = delta.get(
+                                        "reasoning_content"
+                                    ) or delta.get("reasoning")
                                     if reasoning_content:
                                         if (
                                             not content_blocks
@@ -1729,7 +1872,7 @@ async def process_chat_response(
 
                 await stream_body_handler(response)
 
-                MAX_TOOL_CALL_RETRIES = 5
+                MAX_TOOL_CALL_RETRIES = 10
                 tool_call_retries = 0
 
                 while len(tool_calls) > 0 and tool_call_retries < MAX_TOOL_CALL_RETRIES:
@@ -1768,6 +1911,15 @@ async def process_chat_response(
                             )
                         except Exception as e:
                             log.debug(e)
+                            # Fallback to JSON parsing
+                            try:
+                                tool_function_params = json.loads(
+                                    tool_call.get("function", {}).get("arguments", "{}")
+                                )
+                            except Exception as e:
+                                log.debug(
+                                    f"Error parsing tool call arguments: {tool_call.get('function', {}).get('arguments', '{}')}"
+                                )
 
                         tool_result = None
 
@@ -1776,25 +1928,65 @@ async def process_chat_response(
                             spec = tool.get("spec", {})
 
                             try:
-                                required_params = spec.get("parameters", {}).get(
-                                    "required", []
+                                allowed_params = (
+                                    spec.get("parameters", {})
+                                    .get("properties", {})
+                                    .keys()
                                 )
-                                tool_function = tool["callable"]
+
                                 tool_function_params = {
                                     k: v
                                     for k, v in tool_function_params.items()
-                                    if k in required_params
+                                    if k in allowed_params
                                 }
-                                tool_result = await tool_function(
-                                    **tool_function_params
-                                )
+
+                                if tool.get("direct", False):
+                                    tool_result = await event_caller(
+                                        {
+                                            "type": "execute:tool",
+                                            "data": {
+                                                "id": str(uuid4()),
+                                                "name": tool_name,
+                                                "params": tool_function_params,
+                                                "server": tool.get("server", {}),
+                                                "session_id": metadata.get(
+                                                    "session_id", None
+                                                ),
+                                            },
+                                        }
+                                    )
+
+                                else:
+                                    tool_function = tool["callable"]
+                                    tool_result = await tool_function(
+                                        **tool_function_params
+                                    )
+
                             except Exception as e:
                                 tool_result = str(e)
+
+                        tool_result_files = []
+                        if isinstance(tool_result, list):
+                            for item in tool_result:
+                                # check if string
+                                if isinstance(item, str) and item.startswith("data:"):
+                                    tool_result_files.append(item)
+                                    tool_result.remove(item)
+
+                        if isinstance(tool_result, dict) or isinstance(
+                            tool_result, list
+                        ):
+                            tool_result = json.dumps(tool_result, indent=2)
 
                         results.append(
                             {
                                 "tool_call_id": tool_call_id,
                                 "content": tool_result,
+                                **(
+                                    {"files": tool_result_files}
+                                    if tool_result_files
+                                    else {}
+                                ),
                             }
                         )
 
@@ -1993,11 +2185,6 @@ async def process_chat_response(
                             }
                         )
 
-                        log.info(f"content_blocks={content_blocks}")
-                        log.info(
-                            f"serialize_content_blocks={serialize_content_blocks(content_blocks)}"
-                        )
-
                         try:
                             res = await generate_chat_completion(
                                 request,
@@ -2084,7 +2271,9 @@ async def process_chat_response(
                 await response.background()
 
         # background_tasks.add_task(post_response_handler, response, events)
-        task_id, _ = create_task(post_response_handler(response, events))
+        task_id, _ = create_task(
+            post_response_handler(response, events), id=metadata["chat_id"]
+        )
         return {"status": True, "task_id": task_id}
 
     else:
