@@ -257,7 +257,7 @@ def get_image_model(request):
         return (
             request.app.state.config.IMAGE_GENERATION_MODEL
             if request.app.state.config.IMAGE_GENERATION_MODEL
-            else "imagen-3.0-generate-002"
+            else "gemini-2.0-flash-exp-image-generation"
         )
     elif request.app.state.config.IMAGE_GENERATION_ENGINE == "comfyui":
         return (
@@ -336,7 +336,7 @@ def get_models(request: Request, user=Depends(get_verified_user)):
             ]
         elif request.app.state.config.IMAGE_GENERATION_ENGINE == "gemini":
             return [
-                {"id": "imagen-3-0-generate-002", "name": "imagen-3.0 generate-002"},
+                {"id": "gemini-2.0-flash-exp-image-generation", "name": "gemini-2.0-flash-exp-image-generation"},
             ]
         elif request.app.state.config.IMAGE_GENERATION_ENGINE == "comfyui":
             # TODO - get models from comfyui
@@ -513,6 +513,8 @@ async def image_generations(
                 headers=headers,
             )
 
+            if r is None:
+                raise HTTPException(status_code=500, detail="Failed to get response from OpenAI API")
             r.raise_for_status()
             res = r.json()
 

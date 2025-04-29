@@ -1262,5 +1262,8 @@
 	"Your entire contribution will go directly to the plugin developer; Open WebUI does not take any percentage. However, the chosen funding platform might have its own fees.": "您的全部捐款将直接给到插件开发者，Open WebUI 不会收取任何比例。但众筹平台可能会有服务费、抽成。",
 	"Youtube": "YouTube",
 	"Youtube Language": "Youtube 语言",
-	"Youtube Proxy URL": "Youtube 代理 URL"
+	"Youtube Proxy URL": "Youtube 代理 URL",
+	"Global RAG Expert Library": "全局 RAG 专家库",
+	"Use Global RAG Expert Library": "激活全局 RAG 专家库",
+	"Collection Name": "集合名称"
 }

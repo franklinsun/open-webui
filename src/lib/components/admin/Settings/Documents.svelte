@@ -59,10 +59,6 @@
 
 	let RAGConfig = null;
 
-	let collectionNames: string[] = [];
-	let useGlobalRAG = false;
-	let collectionName = '';
-
 	const embeddingModelUpdateHandler = async () => {
 		if (embeddingEngine === '' && embeddingModel.split('/').length - 1 > 1) {
 			toast.error(
@@ -189,33 +185,6 @@
 				await rerankingModelUpdateHandler();
 			}
 		}
-
-		const res = await updateRAGConfig(localStorage.token, {
-			pdf_extract_images: pdfExtractImages,
-			enable_google_drive_integration: enableGoogleDriveIntegration,
-			enable_onedrive_integration: enableOneDriveIntegration,
-			file: {
-				max_size: fileMaxSize === '' ? null : fileMaxSize,
-				max_count: fileMaxCount === '' ? null : fileMaxCount
-			},
-			RAG_FULL_CONTEXT: RAG_FULL_CONTEXT,
-			BYPASS_EMBEDDING_AND_RETRIEVAL: BYPASS_EMBEDDING_AND_RETRIEVAL,
-			chunk: {
-				text_splitter: textSplitter,
-				chunk_overlap: chunkOverlap,
-				chunk_size: chunkSize
-			},
-			content_extraction: {
-				engine: contentExtractionEngine,
-				tika_server_url: tikaServerUrl,
-				document_intelligence_config: {
-					key: documentIntelligenceKey,
-					endpoint: documentIntelligenceEndpoint
-				}
-			},
-			use_global_rag: useGlobalRAG,
-			collection_name: collectionName
-		});
 
 		const res = await updateRAGConfig(localStorage.token, RAGConfig);
 		dispatch('save');
@@ -894,19 +863,19 @@
 					<div class="flex justify-between items-center text-xs">
 						<div class="text-xs font-medium">{$i18n.t('Use Global RAG Expert Library')}</div>
 						<div>
-							<Switch bind:state={useGlobalRAG} />
+							<Switch bind:state={RAGConfig.USE_GLOBAL_RAG} />
 						</div>
 					</div>
 
-					{#if useGlobalRAG}
+					{#if RAGConfig.USE_GLOBAL_RAG}
 						<div class="mb-2.5">
 							<div class="mb-1 text-xs font-medium">{$i18n.t('Collection Name')}</div>
 							<select
 								class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
-								bind:value={collectionName}
+								bind:value={RAGConfig.COLLECTION_NAME}
 								required
 							>
-								{#each collectionNames as collection}
+								{#each RAGConfig.COLLECTION_NAMES as collection}
 									<option value={collection}>{collection}</option>
 								{/each}
 							</select>

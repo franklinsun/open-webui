@@ -407,6 +407,7 @@ def get_sources_from_global_rag(
     embedding_function,
     k,
     reranking_function,
+    k_reranker: int,
     r,
     hybrid_search,
     full_context=False,
@@ -435,6 +436,7 @@ def get_sources_from_global_rag(
                         embedding_function=embedding_function,
                         k=k,
                         reranking_function=reranking_function,
+                        k_reranker=k_reranker,
                         r=r,
                     )
                 except Exception as e:

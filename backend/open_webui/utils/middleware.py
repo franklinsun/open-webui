@@ -49,7 +49,7 @@ from open_webui.models.users import UserModel
 from open_webui.models.functions import Functions
 from open_webui.models.models import Models
 
-from open_webui.retrieval.utils import get_sources_from_files
+from open_webui.retrieval.utils import get_sources_from_files, get_sources_from_global_rag
 
 
 from open_webui.utils.chat import generate_chat_completion
@@ -647,6 +647,7 @@ async def chat_completion_files_handler(
                     ),
                     k=request.app.state.config.TOP_K,
                     reranking_function=request.app.state.rf,
+                    k_reranker=request.app.state.config.TOP_K_RERANKER,
                     r=request.app.state.config.RELEVANCE_THRESHOLD,
                     hybrid_search=request.app.state.config.ENABLE_RAG_HYBRID_SEARCH,
                     full_context=request.app.state.config.RAG_FULL_CONTEXT,

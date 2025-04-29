@@ -57,8 +57,8 @@ type RAGConfigForm = {
 	content_extraction?: ContentExtractConfigForm;
 	web_loader_ssl_verification?: boolean;
 	youtube?: YoutubeConfigForm;
-	use_global_rag?: boolean;
-	collection_name?: string;
+	USE_GLOBAL_RAG?: boolean;
+	COLLECTION_NAME?: string;
 };
 
 export const updateRAGConfig = async (token: string, payload: RAGConfigForm) => {
