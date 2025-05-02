@@ -1075,6 +1075,22 @@ async def chat_completion(
     form_data: dict,
     user=Depends(get_verified_user),
 ):
+    """用户发送聊天请求的处理入口
+
+    Args:
+        request (Request): _description_
+        form_data (dict): _description_
+        user (_type_, optional): _description_. Defaults to Depends(get_verified_user).
+
+    Raises:
+        Exception: _description_
+        e: _description_
+        HTTPException: _description_
+        HTTPException: _description_
+
+    Returns:
+        _type_: _description_
+    """
     if not request.app.state.MODELS:
         await get_all_models(request, user=user)
 
@@ -1130,7 +1146,7 @@ async def chat_completion(
 
         request.state.metadata = metadata
         form_data["metadata"] = metadata
-
+        # 前置处理
         form_data, metadata, events = await process_chat_payload(
             request, form_data, user, metadata, model
         )
@@ -1153,6 +1169,7 @@ async def chat_completion(
         )
 
     try:
+        log.debug(f"Chat completion request: {form_data}")
         response = await chat_completion_handler(request, form_data, user)
 
         return await process_chat_response(

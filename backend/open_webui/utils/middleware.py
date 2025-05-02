@@ -100,40 +100,70 @@ log.setLevel(SRC_LOG_LEVELS["MAIN"])
 async def chat_completion_tools_handler(
     request: Request, body: dict, extra_params: dict, user: UserModel, models, tools
 ) -> tuple[dict, dict]:
+    """ 这个函数在非原生工具调用模式下 (metadata.get("function_calling") != "native") 被 process_chat_payload 调用。它的核心作用是：
+        1. 使用一个特殊的提示模板 (TOOLS_FUNCTION_CALLING_PROMPT_TEMPLATE) 和工具规格 (tools_specs) 先调用一次 LLM (通常是 task_model_id 指定的模型)，让 LLM 判断应该调用哪个工具以及使用什么参数。
+        2. 解析 LLM 的响应，获取工具调用指令。
+        3. 遍历指令，查找 tools_dict 中对应的工具信息。
+        4. 执行工具:
+            如果工具是外部的 (direct: True)，它可能会使用 event_caller 发送 execute:tool 事件（委派执行）。
+            如果工具是内部的 (direct: False)，直接调用 tool["callable"]。
+        5.将工具执行结果添加到消息历史 (form_data["messages"]) 或 RAG 上下文 (sources) 中。
+    Args:
+        request (Request): FastAPI 请求对象
+        body (dict): 包含聊天消息、模型 ID 等的字典 (类似 form_data)
+        extra_params (dict): 包含事件发射器、用户信息、元数据等的字典
+        user (UserModel): 当前用户信息
+        models (_type_): 可用模型列表
+        tools (_type_): 由 get_tools 准备好的工具字典 {tool_name: {"callable": ..., "spec": ..., "direct": ...}}
+
+    Returns:
+        tuple[dict, dict]: 一个元组 (更新后的 body, {"sources": sources})
+    """
+    # 定义一个异步辅助函数，用于从 LLM 响应中提取 'content' 字段。
+    # 它处理流式和非流式响应。    
     async def get_content_from_response(response) -> Optional[str]:
         content = None
         if hasattr(response, "body_iterator"):
+            # 如果是流式响应，异步迭代响应体
             async for chunk in response.body_iterator:
+                # 解码块并解析 JSON
                 data = json.loads(chunk.decode("utf-8"))
+                # 提取消息内容
                 content = data["choices"][0]["message"]["content"]
 
-            # Cleanup any remaining background tasks if necessary
+            # 清理后台任务（如果存在）
             if response.background is not None:
                 await response.background()
         else:
+            # 如果是非流式响应，直接提取内容
             content = response["choices"][0]["message"]["content"]
         return content
-
+    # 定义一个辅助函数，用于构建发送给 LLM 以决定工具调用的特定 payload。
     def get_tools_function_calling_payload(messages, task_model_id, content):
+        # 获取最后的用户消息
         user_message = get_last_user_message(messages)
+        # 获取最近的4条消息作为历史记录
         history = "\n".join(
             f"{message['role'].upper()}: \"\"\"{message['content']}\"\"\""
             for message in messages[::-1][:4]
         )
-
+        # 构建提示，包含历史记录和当前查询
         prompt = f"History:\n{history}\nQuery: {user_message}"
-
+        # 返回构建好的 payload
         return {
-            "model": task_model_id,
+            "model": task_model_id, # 使用指定的任务模型
             "messages": [
-                {"role": "system", "content": content},
-                {"role": "user", "content": f"Query: {prompt}"},
+                {"role": "system", "content": content}, # 系统消息包含工具描述和指令
+                {"role": "user", "content": f"Query: {prompt}"}, # 用户消息包含上下文和查询
             ],
-            "stream": False,
-            "metadata": {"task": str(TASKS.FUNCTION_CALLING)},
+            "stream": False, # 非流式，需要完整结果
+            "metadata": {"task": str(TASKS.FUNCTION_CALLING)}, # 标记任务类型
         }
-
+    # event_caller 用于通过 WebSocket 触发后端事件。
+    # 在这里，它主要用于委派外部工具 (direct: True) 的执行。
+    # 当需要调用外部工具时，会发送一个 execute:tool 事件，可能由另一个进程或任务来处理实际的 HTTP 请求。
     event_caller = extra_params["__event_call__"]
+    # 包含当前请求的元数据，如 session_id，这对于 event_caller 路由事件可能很重要。
     metadata = extra_params["__metadata__"]
 
     task_model_id = get_task_model_id(
@@ -142,31 +172,38 @@ async def chat_completion_tools_handler(
         request.app.state.config.TASK_MODEL_EXTERNAL,
         models,
     )
-
+    # 这个标志用于控制后续的 RAG 文件处理。如果某个被调用的工具设置了 file_handler: True 元数据，
+    # 这个标志会被设为 True，表示该工具已经处理了文件相关信息，
+    # 后续的 RAG 文件处理步骤 (chat_completion_files_handler) 应该跳过用户上传的文件。
     skip_files = False
     sources = []
 
     specs = [tool["spec"] for tool in tools.values()]
+    # 准备将工具规格注入到给 LLM 的提示中。
     tools_specs = json.dumps(specs)
 
     if request.app.state.config.TOOLS_FUNCTION_CALLING_PROMPT_TEMPLATE != "":
         template = request.app.state.config.TOOLS_FUNCTION_CALLING_PROMPT_TEMPLATE
     else:
         template = DEFAULT_TOOLS_FUNCTION_CALLING_PROMPT_TEMPLATE
-
+    # 将序列化的工具规格 (tools_specs) 注入到选定的提示模板 (template) 中，生成最终的系统提示内容 (tools_function_calling_prompt)。这个提示会告诉 LLM 可用的工具以及如何选择它们。
     tools_function_calling_prompt = tools_function_calling_generation_template(
         template, tools_specs
     )
+    # 使用聊天消息、选定的任务模型 ID 和生成的工具调用提示，创建用于第一次 LLM 调用的完整请求体 (payload)。
     payload = get_tools_function_calling_payload(
         body["messages"], task_model_id, tools_function_calling_prompt
     )
+    log.info(f"get_tools_function_calling_payload: {payload}")
 
     try:
+        # 向指定的 task_model_id 发送请求，让它根据用户查询、聊天历史和提供的工具规格，决定应该调用哪个工具以及使用什么参数。
         response = await generate_chat_completion(request, form_data=payload, user=user)
-        log.debug(f"{response=}")
+        log.info(f"{response=}")
+        # 从 LLM 的响应中提取包含工具调用决策的文本内容。
         content = await get_content_from_response(response)
-        log.debug(f"{content=}")
-
+        log.info(f"{content=}")
+        # 如果 LLM 没有返回有效内容（例如，它决定不需要调用工具，或者调用失败），则直接返回原始的 body 和空的 flags，跳过后续的工具执行。
         if not content:
             return body, {}
 
@@ -176,16 +213,17 @@ async def chat_completion_tools_handler(
                 raise Exception("No JSON object found in the response")
 
             result = json.loads(content)
-
+            # 定义一个内部异步函数来处理单个工具调用指令
             async def tool_call_handler(tool_call):
+                # 允许修改外部作用域的 skip_files 变量
                 nonlocal skip_files
 
-                log.debug(f"{tool_call=}")
+                log.info(f"{tool_call=}")
 
                 tool_function_name = tool_call.get("name", None)
                 if tool_function_name not in tools:
                     return body, {}
-
+                # 获取LLM建议的参数
                 tool_function_params = tool_call.get("parameters", {})
 
                 try:
@@ -195,12 +233,13 @@ async def chat_completion_tools_handler(
                     allowed_params = (
                         spec.get("parameters", {}).get("properties", {}).keys()
                     )
+                    # 过滤LLM提供的参数，只保留规格中允许的参数
                     tool_function_params = {
                         k: v
                         for k, v in tool_function_params.items()
                         if k in allowed_params
                     }
-
+                    # 检查 'direct' 标志来区分内部工具和外部工具
                     if tool.get("direct", False):
                         tool_result = await event_caller(
                             {
@@ -220,7 +259,7 @@ async def chat_completion_tools_handler(
 
                 except Exception as e:
                     tool_result = str(e)
-
+                # --- 处理工具执行结果 ---
                 tool_result_files = []
                 if isinstance(tool_result, list):
                     for item in tool_result:
@@ -231,7 +270,7 @@ async def chat_completion_tools_handler(
 
                 if isinstance(tool_result, dict) or isinstance(tool_result, list):
                     tool_result = json.dumps(tool_result, indent=2)
-
+                # --- 结果整合 ---
                 if isinstance(tool_result, str):
                     tool = tools[tool_function_name]
                     tool_id = tool.get("tool_id", "")
@@ -241,6 +280,7 @@ async def chat_completion_tools_handler(
                         if tool_id
                         else f"{tool_function_name}"
                     )
+                    # 检查是否需要将结果作为 RAG 来源 (citation: True 或 外部工具)
                     if tool.get("metadata", {}).get("citation", False) or tool.get(
                         "direct", False
                     ):
@@ -293,6 +333,23 @@ async def chat_completion_tools_handler(
 async def chat_web_search_handler(
     request: Request, form_data: dict, extra_params: dict, user
 ):
+    """1. 调用 generate_queries (在 routers/tasks.py) 生成搜索查询。
+        2. 调用 process_web_search (在 routers/retrieval.py) 执行 Web 搜索。
+        3. 将搜索结果（文档内容或集合名称）添加到 form_data["files"] 中，以便后续 RAG 处理。
+        4. 通过 event_emitter 向前端发送搜索状态更新。
+
+    Args:
+        request (Request): _description_
+        form_data (dict): _description_
+        extra_params (dict): _description_
+        user (_type_): _description_
+
+    Raises:
+        Exception: _description_
+
+    Returns:
+        _type_: _description_
+    """
     event_emitter = extra_params["__event_emitter__"]
     await event_emitter(
         {
@@ -474,6 +531,23 @@ async def chat_web_search_handler(
 async def chat_image_generation_handler(
     request: Request, form_data: dict, extra_params: dict, user
 ):
+    """1. 调用 generate_image_prompt (在 routers/tasks.py) 优化生成提示。
+        2. 调用 image_generations (在 routers/images.py) 调用配置的图像生成引擎 API。
+        3. 通过 event_emitter 向前端发送生成的图像文件信息和状态更新。
+        4. 向 form_data["messages"] 添加一条系统消息，告知 LLM 图像已生成（或生成失败）。
+
+    Args:
+        request (Request): _description_
+        form_data (dict): _description_
+        extra_params (dict): _description_
+        user (_type_): _description_
+
+    Raises:
+        Exception: _description_
+
+    Returns:
+        _type_: _description_
+    """
     __event_emitter__ = extra_params["__event_emitter__"]
     await __event_emitter__(
         {
@@ -703,13 +777,36 @@ def apply_params_to_form_data(form_data, model):
 
 
 async def process_chat_payload(request, form_data, user, metadata, model):
+    """负责处理各种前置任务，包括 RAG、Web 搜索、图像生成以及 工具调用。
 
+    Args:
+        request (_type_): 请求对象，用于访问应用状态和配置
+        form_data (_type_): 包含聊天消息、模型 ID 等的字典
+        user (_type_): 当前用户信息 (UserModel)
+        metadata (_type_): 包含聊天 ID、消息 ID、会话 ID 等上下文信息的字典
+        model (_type_): 当前选择的 LLM 模型信息字典
+
+    Raises:
+        e: _description_
+        Exception: _description_
+        Exception: _description_
+
+    Returns:
+        _type_: 一个元组 (form_data, metadata, events)
+    """
+    # 将 model 定义中包含的模型特定参数（例如温度 temperature、最大令牌数 max_tokens 等）合并到 form_data 中。
+    # 这样可以确保发送给 LLM 的请求包含了模型预设的参数。
     form_data = apply_params_to_form_data(form_data, model)
     log.debug(f"form_data: {form_data}")
-
+    # 获取用于 WebSocket 通信的函数。
+    # event_emitter 用于向前端发送事件（例如状态更新），
+    # event_call 用于从后端触发需要通过 WebSocket 处理的任务（例如执行代码解释器、调用某些工具）。
+    # 它们通常与特定的会话 ID 和用户 ID 关联。
     event_emitter = get_event_emitter(metadata)
     event_call = get_event_call(metadata)
-
+    # 这个字典捆绑了各种上下文信息（WebSocket 通信句柄、用户信息、请求元数据、FastAPI 请求对象、模型信息），
+    # 以便后续传递给过滤器函数 (process_filter_functions) 和工具函数 (get_tools)。
+    # 这允许这些函数访问当前的请求状态和用户信息。
     extra_params = {
         "__event_emitter__": event_emitter,
         "__event_call__": event_call,
@@ -724,29 +821,33 @@ async def process_chat_payload(request, form_data, user, metadata, model):
         "__model__": model,
     }
 
-    # Initialize events to store additional event to be sent to the client
-    # Initialize contexts and citation
+    # 检查请求状态中是否有 direct 标志（通常表示这是一个直接连接到外部 LLM API 的请求，而不是通过 Open WebUI 管理的模型）。
+    # 如果是直接连接，则只使用该特定模型；否则，使用 request.app.state.MODELS 中缓存的所有可用模型列表（这些模型在 utils/models.py:get_all_models 中加载）
     if getattr(request.state, "direct", False) and hasattr(request.state, "model"):
         models = {
             request.state.model["id"]: request.state.model,
         }
     else:
         models = request.app.state.MODELS
-
+    # 根据配置 (TASK_MODEL, TASK_MODEL_EXTERNAL) 和当前选择的模型 (form_data["model"])，
+    # 确定用于执行内部后台任务（如标题生成、标签生成、RAG 查询生成等）的模型 ID。
+    # 这允许为这些任务指定一个可能不同于主聊天模型的、更轻量或专门的模型。
     task_model_id = get_task_model_id(
         form_data["model"],
         request.app.state.config.TASK_MODEL,
         request.app.state.config.TASK_MODEL_EXTERNAL,
         models,
     )
-
+    # events 用于存储需要在处理完成后发送给前端的事件（例如 RAG 检索到的来源信息）
     events = []
+    # sources 用于累积从 RAG 或工具调用中获取的上下文来源信息。
     sources = []
-
+    # 从 form_data["messages"] 列表中提取最后一条用户发送的消息内容。这通常用作 RAG 查询或 Web 搜索查询的基础。
     user_message = get_last_user_message(form_data["messages"])
-    model_knowledge = model.get("info", {}).get("meta", {}).get("knowledge", False)
 
+    model_knowledge = model.get("info", {}).get("meta", {}).get("knowledge", False)
     if model_knowledge:
+        # 通过 event_emitter 向前端发送一个状态更新事件，告知用户正在进行知识库搜索。
         await event_emitter(
             {
                 "type": "status",
@@ -757,7 +858,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                 },
             }
         )
-
+        # 将模型配置中定义的知识库信息（集合名称等）添加到 form_data 的 files 列表中，以便后续 RAG 处理。
         knowledge_files = []
         for item in model_knowledge:
             if item.get("collection_name"):
@@ -786,14 +887,16 @@ async def process_chat_payload(request, form_data, user, metadata, model):
 
     variables = form_data.pop("variables", None)
 
-    # Process the form_data through the pipeline
+    #  执行配置的“入口过滤器”(Inlet Filter)。
+    # 这些过滤器是在请求发送给 LLM 之前 执行的自定义函数（通常是外部 Pipeline 服务），可以修改请求内容 (form_data)。
     try:
         form_data = await process_pipeline_inlet_filter(
             request, form_data, user, models
         )
     except Exception as e:
         raise e
-
+    # 执行内部定义的过滤器函数（存储在数据库中，类型为 "filter"）。
+    # 这些函数也可以在请求发送给 LLM 之前修改 form_data。extra_params 被传递给这些函数。
     try:
         filter_functions = [
             Functions.get_function_by_id(filter_id)
@@ -809,7 +912,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
         )
     except Exception as e:
         raise Exception(f"Error: {e}")
-
+    # 检查用户是否在前端启用了特定功能。
     features = form_data.pop("features", None)
     if features:
         if "web_search" in features and features["web_search"]:
@@ -822,6 +925,8 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                 request, form_data, extra_params, user
             )
 
+        # 将代码解释器的系统提示（来自配置 CODE_INTERPRETER_PROMPT_TEMPLATE 或默认值 DEFAULT_CODE_INTERPRETER_PROMPT）添加到 form_data["messages"] 中。
+        # 这指示 LLM 可以使用代码解释器工具。
         if "code_interpreter" in features and features["code_interpreter"]:
             form_data["messages"] = add_or_update_user_message(
                 (
@@ -831,14 +936,14 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                 ),
                 form_data["messages"],
             )
-
+    # 准备工具 ID 和文件列表，用于后续的工具调用和 RAG 处理。
     tool_ids = form_data.pop("tool_ids", None)
     files = form_data.pop("files", None)
-
+    # 去重是为了避免重复处理相同的文件/知识库。
     # Remove files duplicates
     if files:
         files = list({json.dumps(f, sort_keys=True): f for f in files}.values())
-
+    # 确保处理后的工具 ID 和文件列表在 metadata 中可用，并将其传递给后续步骤（如 generate_chat_completion）。
     metadata = {
         **metadata,
         "tool_ids": tool_ids,
@@ -853,10 +958,15 @@ async def process_chat_payload(request, form_data, user, metadata, model):
 
     log.debug(f"{tool_ids=}")
     log.debug(f"{tool_servers=}")
-
+    # 这个字典将用于存储所有准备好的工具信息，包括内部工具和外部工具服务器的函数定义、可调用包装器 (callable) 和规格 (spec)。
+    # 键是工具函数的名称。
     tools_dict = {}
 
     if tool_ids:
+        # get_tools 负责加载指定的内部 Python 工具模块。
+        # 对于每个工具函数，它会创建一个异步包装器 (callable)，该包装器在调用时会注入 extra_params（如用户信息、请求对象等）。
+        # 它还会获取或生成工具函数的规格说明 (spec)。
+        # 返回的 tools_dict 包含了这些工具函数的信息，键是函数名。
         tools_dict = get_tools(
             request,
             tool_ids,
@@ -870,6 +980,13 @@ async def process_chat_payload(request, form_data, user, metadata, model):
         )
 
     if tool_servers:
+        # 对于每个服务器，提取其提供的工具函数规格 (specs)。
+        # 将每个外部工具函数的信息添加到 tools_dict 中。
+        # direct: True 标志表明这是一个外部工具。
+        # server 字段存储了服务器的 URL 和可能的认证信息。
+        # 注意: 这种直接传递 tool_servers 的方式不如通过配置 (TOOL_SERVER_CONNECTIONS) 添加外部工具常见。
+        # 通过配置添加的外部工具是在 get_tools 函数内部处理的（当 tool_id 是 server:<idx> 格式时），
+        # get_tools 会为它们创建 callable 包装器来调用 execute_tool_server。
         for tool_server in tool_servers:
             tool_specs = tool_server.pop("specs", [])
 
@@ -881,6 +998,12 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                 }
 
     if tools_dict:
+        # 原生工具调用模式: 如果是 "native"，表示希望 LLM 直接处理工具调用决策。
+        # 将完整的 tools_dict (包含 callable 等) 存储在 metadata["tools"] 中。
+        # 这将在 process_chat_response 中用于实际执行 LLM 返回的工具调用指令。
+        # 将工具的规格 (spec) 提取出来，格式化成 LLM（如 OpenAI）能理解的 tools 参数格式，
+        # 并添加到 form_data["tools"] 中。这将随聊天请求一起发送给 LLM。
+
         if metadata.get("function_calling") == "native":
             # If the function calling is native, then call the tools function calling handler
             metadata["tools"] = tools_dict
@@ -889,26 +1012,31 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                 for tool in tools_dict.values()
             ]
         else:
-            # If the function calling is not native, then call the tools function calling handler
+            # 非原生工具调用模式
+            # 将工具执行结果添加到消息历史 (form_data["messages"]) 或 RAG 上下文 (sources) 中
+            # 关键区别: 这种模式下，工具调用发生在主 LLM 调用之前，并且工具调用的决策是由一个单独的（可能是专门的）LLM 调用完成的。
             try:
                 form_data, flags = await chat_completion_tools_handler(
                     request, form_data, extra_params, user, models, tools_dict
                 )
+                # 将 chat_completion_tools_handler 返回的 sources 添加到当前的 sources 列表中。
                 sources.extend(flags.get("sources", []))
 
             except Exception as e:
                 log.exception(e)
-
+        log.info(f"function_calling = {metadata.get("function_calling")}, form_data = {form_data}")
     try:
+        # 处理 RAG（Retrieval-Augmented Generation）的核心步骤。
         form_data, flags = await chat_completion_files_handler(request, form_data, user)
         sources.extend(flags.get("sources", []))
     except Exception as e:
         log.exception(e)
 
-    # If context is not empty, insert it into the messages
+    # 如果 sources 列表不为空（表示 RAG 或工具调用产生了上下文信息）。
     if len(sources) > 0:
         context_string = ""
         citated_file_idx = {}
+        # 构建 context_string：遍历 sources，将每个文档片段 (doc_context) 用 <source id="..."> 标签包裹起来。id 用于后续可能的引用标记。
         for _, source in enumerate(sources, 1):
             if "document" in source:
                 for doc_context, doc_meta in zip(
@@ -932,9 +1060,11 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                 f"With a 0 relevancy threshold for RAG, the context cannot be empty"
             )
 
+        # 使用配置的 RAG 模板 (RAG_TEMPLATE)、构建的 context_string 和用户 prompt 来生成最终注入到 LLM 请求中的上下文提示。
         # Workaround for Ollama 2.0+ system prompt issue
         # TODO: replace with add_or_update_system_message
         if model.get("owned_by") == "ollama":
+            # 对于 Ollama 模型，使用 prepend_to_first_user_message_content (在 utils/misc.py) 将其添加到第一条用户消息的开头（作为对 Ollama 处理系统消息问题的变通）
             form_data["messages"] = prepend_to_first_user_message_content(
                 rag_template(
                     request.app.state.config.RAG_TEMPLATE, context_string, prompt
@@ -942,6 +1072,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                 form_data["messages"],
             )
         else:
+            # 对于其他模型，使用 add_or_update_system_message (在 utils/misc.py) 将其作为系统消息添加或更新。
             form_data["messages"] = add_or_update_system_message(
                 rag_template(
                     request.app.state.config.RAG_TEMPLATE, context_string, prompt
@@ -950,11 +1081,15 @@ async def process_chat_payload(request, form_data, user, metadata, model):
             )
 
     # If there are citations, add them to the data_items
+    # 过滤 sources 列表，确保每个来源都有一个名称。如果过滤后仍有来源，则将整个 sources 列表作为一个事件添加到 events 列表中。
+    # 作用: 准备将检索到的来源信息发送给前端，以便在 UI 中显示引用。
+    log.info(f"Sources: {sources}")
     sources = [source for source in sources if source.get("source", {}).get("name", "")]
-
+    log.info(f"Sources (filter): {sources}")
     if len(sources) > 0:
         events.append({"sources": sources})
-
+    # 如果模型关联了知识库 (model_knowledge 为真)。
+    # 通过 event_emitter 向前端发送一个最终的状态更新事件，标记知识库搜索完成（即使没有找到来源，也标记为完成）。hidden: True 可能表示这个状态更新不在 UI 中显式显示给用户。
     if model_knowledge:
         await event_emitter(
             {
@@ -1195,7 +1330,7 @@ async def process_chat_response(
         for filter_id in get_sorted_filter_ids(model)
     ]
 
-    # Streaming response
+    # 流式响应处理
     if event_emitter and event_caller:
         task_id = str(uuid4())  # Create a unique task ID.
         model_id = form_data.get("model", "")
@@ -1222,7 +1357,7 @@ async def process_chat_response(
             # Even number of segments means the last backticks are opening a new block
             return len(backtick_segments) > 1 and len(backtick_segments) % 2 == 0
 
-        # Handle as a background task
+        # 异步处理数据流，并在流结束后执行工具调用和可能的递归 LLM 调用。
         async def post_response_handler(response, events):
             def serialize_content_blocks(content_blocks, raw=False):
                 content = ""
@@ -1527,7 +1662,7 @@ async def process_chat_response(
             message = Chats.get_message_by_id_and_message_id(
                 metadata["chat_id"], metadata["message_id"]
             )
-
+            # 用于在流处理过程中 累积 从 LLM 返回的 tool_calls 指令块。
             tool_calls = []
 
             last_assistant_message = None
@@ -1538,20 +1673,23 @@ async def process_chat_response(
                     )
             except Exception as e:
                 pass
-
+            #  用于累积纯文本内容（主要用于非实时保存和可能的旧逻辑）
             content = (
                 message.get("content", "")
                 if message
                 else last_assistant_message if last_assistant_message else ""
             )
-
+            log.info(f"content: {content}")
+            # 这是一个列表，用于结构化地存储响应内容。
+            # 每个元素是一个字典，包含 type (如 "text", "tool_calls", "code_interpreter", "reasoning") 和 content。
+            # 这对于后续重新构建消息列表至关重要。初始时通常有一个空的 "text" 块。
             content_blocks = [
                 {
                     "type": "text",
                     "content": content,
                 }
             ]
-
+            log.info(f"content_blocks: {content_blocks}")
             # We might want to disable this by default
             DETECT_REASONING = True
             DETECT_SOLUTION = True
@@ -1590,17 +1728,16 @@ async def process_chat_response(
                             **event,
                         },
                     )
-
+                
                 async def stream_body_handler(response):
                     nonlocal content
                     nonlocal content_blocks
-
+                    # 累积工具调用信息: 将 id, function.name, function.arguments 等信息 逐步累加 到 response_tool_calls 列表中对应的工具调用对象里
                     response_tool_calls = []
-
+                    # 迭代处理流
                     async for line in response.body_iterator:
                         line = line.decode("utf-8") if isinstance(line, bytes) else line
                         data = line
-
                         # Skip empty lines
                         if not data.strip():
                             continue
@@ -1614,7 +1751,7 @@ async def process_chat_response(
 
                         try:
                             data = json.loads(data)
-
+                            # 应用流式过滤器
                             data, _ = await process_filter_functions(
                                 request=request,
                                 filter_functions=filter_functions,
@@ -1622,7 +1759,6 @@ async def process_chat_response(
                                 form_data=data,
                                 extra_params=extra_params,
                             )
-
                             if data:
                                 if "event" in data:
                                     await event_emitter(data.get("event", {}))
@@ -1660,7 +1796,7 @@ async def process_chat_response(
                                                 }
                                             )
                                         continue
-
+                                    # 检测工具调用
                                     delta = choices[0].get("delta", {})
                                     delta_tool_calls = delta.get("tool_calls", None)
 
@@ -1781,7 +1917,8 @@ async def process_chat_response(
                                         content_blocks[-1]["content"] = (
                                             content_blocks[-1]["content"] + value
                                         )
-
+                                        # 处理特殊标签
+                                        # 如果检测到 <think> 或类似标签，会创建一个新的 type: "reasoning" 的块，并将后续内容添加到这个块中，直到遇到结束标签。
                                         if DETECT_REASONING:
                                             content, content_blocks, _ = (
                                                 tag_content_handler(
@@ -1791,7 +1928,7 @@ async def process_chat_response(
                                                     content_blocks,
                                                 )
                                             )
-
+                                        # 如果检测到 <code_interpreter> 标签，会创建一个新的 type: "code_interpreter" 的块，并将代码内容添加到这个块中，直到遇到结束标签。
                                         if DETECT_CODE_INTERPRETER:
                                             content, content_blocks, end = (
                                                 tag_content_handler(
@@ -1814,7 +1951,7 @@ async def process_chat_response(
                                                     content_blocks,
                                                 )
                                             )
-
+                                        # 序列化后的 content_blocks 保存到数据库。
                                         if ENABLE_REALTIME_CHAT_SAVE:
                                             # Save message in the database
                                             Chats.upsert_message_to_chat_by_id_and_message_id(
@@ -1832,7 +1969,7 @@ async def process_chat_response(
                                                     content_blocks
                                                 ),
                                             }
-
+                                # 调用 event_emitter，将基于 content_blocks 序列化后的内容 (serialize_content_blocks(content_blocks)) 发送给前端，实现打字机和结构化内容的实时显示。
                                 await event_emitter(
                                     {
                                         "type": "chat:completion",
@@ -1878,7 +2015,7 @@ async def process_chat_response(
 
                 while len(tool_calls) > 0 and tool_call_retries < MAX_TOOL_CALL_RETRIES:
                     tool_call_retries += 1
-
+                    # 获取在流处理期间累积完成的一批工具调用指令。
                     response_tool_calls = tool_calls.pop(0)
 
                     content_blocks.append(
@@ -1887,7 +2024,7 @@ async def process_chat_response(
                             "content": response_tool_calls,
                         }
                     )
-
+                    # event_emitter 发送状态更新，告知前端正在执行工具
                     await event_emitter(
                         {
                             "type": "chat:completion",
@@ -1896,14 +2033,14 @@ async def process_chat_response(
                             },
                         }
                     )
-
+                    # 获取之前 get_tools 准备好的工具字典。这个字典包含了外部工具服务器的包装器 callable 和规格 spec。
                     tools = metadata.get("tools", {})
-
+                    # 用于存储工具执行结果。
                     results = []
                     for tool_call in response_tool_calls:
                         tool_call_id = tool_call.get("id", "")
                         tool_name = tool_call.get("function", {}).get("name", "")
-
+                        # 使用 ast.literal_eval 或 json.loads 解析 arguments。ast.literal_eval 更健壮，能处理一些非严格 JSON 的情况。
                         tool_function_params = {}
                         try:
                             # json.loads cannot be used because some models do not produce valid JSON
@@ -1958,6 +2095,7 @@ async def process_chat_response(
                                     )
 
                                 else:
+                                    # callable 是 get_tools 中通过 make_tool_function 创建的异步函数
                                     tool_function = tool["callable"]
                                     tool_result = await tool_function(
                                         **tool_function_params
@@ -1999,7 +2137,7 @@ async def process_chat_response(
                             "content": "",
                         }
                     )
-
+                    # 告知前端工具执行完成，并显示结果
                     await event_emitter(
                         {
                             "type": "chat:completion",
@@ -2010,6 +2148,7 @@ async def process_chat_response(
                     )
 
                     try:
+                        # 将更新后的消息列表（原始消息 + 助手工具调用 + 工具结果）再次发送给 LLM。
                         res = await generate_chat_completion(
                             request,
                             {
@@ -2271,7 +2410,7 @@ async def process_chat_response(
             if response.background is not None:
                 await response.background()
 
-        # background_tasks.add_task(post_response_handler, response, events)
+        # 后台任务创建: post_response_handler 通过 create_task 在后台运行，处理整个流。
         task_id, _ = create_task(
             post_response_handler(response, events), id=metadata["chat_id"]
         )

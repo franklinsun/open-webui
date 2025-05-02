@@ -706,8 +706,8 @@ async def generate_chat_completion(
                 "Content-Type": "application/json",
                 **(
                     {
-                        "HTTP-Referer": "https://openwebui.com/",
-                        "X-Title": "Open WebUI",
+                        "HTTP-Referer": "https://qpuai.com/",
+                        "X-Title": "QP-Bot",
                     }
                     if "openrouter.ai" in url
                     else {}

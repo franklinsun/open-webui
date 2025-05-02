@@ -16,6 +16,20 @@ log.setLevel(SRC_LOG_LEVELS["RAG"])
 def get_task_model_id(
     default_model_id: str, task_model: str, task_model_external: str, models
 ) -> str:
+    """确定用于此特定任务的 LLM 模型 ID。
+    它会优先使用在配置中指定的任务模型 (TASK_MODEL 或 TASK_MODEL_EXTERNAL)，
+    如果未配置或不可用，则回退到用户在聊天中选择的主要模型 (body["model"])。
+    这允许使用一个可能更小、更快或更便宜的模型来处理工具选择逻辑。
+
+    Args:
+        default_model_id (str): _description_
+        task_model (str): _description_
+        task_model_external (str): _description_
+        models (_type_): _description_
+
+    Returns:
+        str: _description_
+    """
     # Set the task model
     task_model_id = default_model_id
     # Check if the user has a custom task model and use that model

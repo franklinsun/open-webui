@@ -1,3 +1,14 @@
+###
+ # @Author: xitao franksunpan@gmail.com
+ # @Date: 2025-04-29 16:33:12
+ # @LastEditors: xitao franksunpan@gmail.com
+ # @LastEditTime: 2025-04-30 07:41:30
+ # @FilePath: /open-webui/backend/dev.sh
+ # @Description: 
+ # 
+ # Copyright (c) 2025 by xitao, All Rights Reserved. 
+ # Part of QP-One. See LICENSE file for full copyright and licensing details.
+### 
 export MILVUS_URI="http://localhost:19530"
 # export OFFLINE_MODE=False
 export CORS_ALLOW_ORIGIN="http://localhost:5173;http://localhost:8080"

@@ -65,27 +65,47 @@ def get_async_tool_function_and_apply_extra_params(
 def get_tools(
     request: Request, tool_ids: list[str], user: UserModel, extra_params: dict
 ) -> dict[str, dict]:
-    tools_dict = {}
+    """根据传入的 tool_ids 列表，准备一个包含所有可用工具函数及其相关信息（如可调用包装器、规格说明）的字典。
+    这个字典稍后会被 middleware.py 中的代码用来决定调用哪个工具以及如何调用。
 
+    Args:
+        request (Request): FastAPI 请求对象，用于访问应用状态（如配置、已加载的工具服务器信息）
+        tool_ids (list[str]): 一个字符串列表，每个字符串代表一个工具的 ID。ID 的格式决定了它是内部工具还是外部工具服务器。
+                            内部工具 ID：通常是工具模块的文件名（不含 .py），例如 "my_internal_tool"。
+                            外部工具服务器 ID：格式为 "server:<idx>"，例如 "server:0"，其中 <idx> 是该服务器在 TOOL_SERVER_CONNECTIONS 配置列表中的索引。
+        user (UserModel): 当前用户信息。
+        extra_params (dict): 一个包含额外上下文参数的字典，这些参数可能会被注入到内部工具函数中（例如 __user__, __request__ 等）
+
+    Returns:
+        dict[str, dict]: _description_
+    """
+    tools_dict = {}
     for tool_id in tool_ids:
+        # 尝试从数据库中查找 ID 对应的内部工具定义（ToolModel）
         tool = Tools.get_tool_by_id(tool_id)
         if tool is None:
-            if tool_id.startswith("server:"):
+            #  tool 为 None 且 tool_id 以 "server:" 开头，是外部工具服务器
+            if tool_id.startswith("server:"):               
                 server_idx = int(tool_id.split(":")[1])
+                # 从应用配置中获取该服务器的连接配置（URL、认证方式、密钥等）。
                 tool_server_connection = (
                     request.app.state.config.TOOL_SERVER_CONNECTIONS[server_idx]
                 )
+                # 在 request.app.state.TOOL_SERVERS 中查找与 server_idx 匹配的已处理的服务器数据。
+                # 这个数据是在应用启动或配置更新时通过 get_tool_servers_data 预先加载和解析好的（包含了从 OpenAPI 规范解析出的 specs）。
                 tool_server_data = None
                 for server in request.app.state.TOOL_SERVERS:
                     if server["idx"] == server_idx:
                         tool_server_data = server
                         break
                 assert tool_server_data is not None
+                # 获取该服务器提供的所有工具函数（操作）的规格列表。
                 specs = tool_server_data.get("specs", [])
-
+                # 遍历服务器的每个函数规格
                 for spec in specs:
+                    # 获取函数名（通常是 OpenAPI 中的 operationId）。
                     function_name = spec["name"]
-
+                    # 根据 tool_server_connection 中的 auth_type（bearer 或 session）获取相应的 token
                     auth_type = tool_server_connection.get("auth_type", "bearer")
                     token = None
 
@@ -93,7 +113,10 @@ def get_tools(
                         token = tool_server_connection.get("key", "")
                     elif auth_type == "session":
                         token = request.state.token.credentials
-
+                    # 创建包装器函数，这是一个关键步骤。
+                    # make_tool_function 是一个工厂函数，它为每个外部工具函数创建一个特定的 async def tool_function(**kwargs)。
+                    # 这个内部的 tool_function 利用闭包（closure）捕获了当前的 function_name, token, 和 tool_server_data。
+                    # 当这个 tool_function 被调用时（传入 kwargs 参数），它会执行 await execute_tool_server(...)，并将捕获的上下文和传入的 kwargs 传递给 execute_tool_server。
                     def make_tool_function(function_name, token, tool_server_data):
                         async def tool_function(**kwargs):
                             print(
@@ -112,7 +135,9 @@ def get_tools(
                     tool_function = make_tool_function(
                         function_name, token, tool_server_data
                     )
-
+                    # 确保包装器函数是异步的（虽然 make_tool_function 已经创建了异步函数，
+                    # 这里可能是为了统一处理流程或未来扩展）。
+                    # 对于外部工具，这里没有注入额外的 extra_params
                     callable = get_async_tool_function_and_apply_extra_params(
                         tool_function,
                         {},
@@ -135,13 +160,16 @@ def get_tools(
             else:
                 continue
         else:
+            # 处理内部 Python 工具 (如果 tool 不为 None)
+            
+            # 尝试从应用状态缓存中获取已加载的模块，否则使用 load_tool_module_by_id 加载。
             module = request.app.state.TOOLS.get(tool_id, None)
             if module is None:
                 module, _ = load_tool_module_by_id(tool_id)
                 request.app.state.TOOLS[tool_id] = module
 
             extra_params["__id__"] = tool_id
-
+            # 加载并应用工具的全局配置 (valves) 和用户特定配置 (UserValves)。
             # Set valves for the tool
             if hasattr(module, "valves") and hasattr(module, "Valves"):
                 valves = Tools.get_tool_valves_by_id(tool_id) or {}
@@ -167,7 +195,9 @@ def get_tools(
 
                 # convert to function that takes only model params and inserts custom params
                 function_name = spec["name"]
+                #  获取实际的 Python 函数对象。
                 tool_function = getattr(module, function_name)
+                # 创建一个异步包装器，并将 extra_params（如 __user__, __request__ 等）注入到函数调用中
                 callable = get_async_tool_function_and_apply_extra_params(
                     tool_function, extra_params
                 )
@@ -457,7 +487,7 @@ async def get_tool_server_data(token: str, url: str) -> Dict[str, Any]:
         "specs": convert_openapi_to_tool_payload(res),
     }
 
-    print("Fetched data:", data)
+    # print("Fetched data:", data)
     return data
 
 
