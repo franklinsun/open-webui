@@ -194,15 +194,15 @@ async def chat_completion_tools_handler(
     payload = get_tools_function_calling_payload(
         body["messages"], task_model_id, tools_function_calling_prompt
     )
-    log.info(f"get_tools_function_calling_payload: {payload}")
+    log.debug(f"get_tools_function_calling_payload: {payload}")
 
     try:
         # 向指定的 task_model_id 发送请求，让它根据用户查询、聊天历史和提供的工具规格，决定应该调用哪个工具以及使用什么参数。
         response = await generate_chat_completion(request, form_data=payload, user=user)
-        log.info(f"{response=}")
+        log.debug(f"{response=}")
         # 从 LLM 的响应中提取包含工具调用决策的文本内容。
         content = await get_content_from_response(response)
-        log.info(f"{content=}")
+        log.debug(f"{content=}")
         # 如果 LLM 没有返回有效内容（例如，它决定不需要调用工具，或者调用失败），则直接返回原始的 body 和空的 flags，跳过后续的工具执行。
         if not content:
             return body, {}
@@ -218,7 +218,7 @@ async def chat_completion_tools_handler(
                 # 允许修改外部作用域的 skip_files 变量
                 nonlocal skip_files
 
-                log.info(f"{tool_call=}")
+                log.debug(f"{tool_call=}")
 
                 tool_function_name = tool_call.get("name", None)
                 if tool_function_name not in tools:
@@ -1024,7 +1024,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
 
             except Exception as e:
                 log.exception(e)
-        log.info(f"function_calling = {metadata.get("function_calling")}, form_data = {form_data}")
+        log.debug(f"function_calling = {metadata.get("function_calling")}, form_data = {form_data}")
     try:
         # 处理 RAG（Retrieval-Augmented Generation）的核心步骤。
         form_data, flags = await chat_completion_files_handler(request, form_data, user)
@@ -1083,9 +1083,9 @@ async def process_chat_payload(request, form_data, user, metadata, model):
     # If there are citations, add them to the data_items
     # 过滤 sources 列表，确保每个来源都有一个名称。如果过滤后仍有来源，则将整个 sources 列表作为一个事件添加到 events 列表中。
     # 作用: 准备将检索到的来源信息发送给前端，以便在 UI 中显示引用。
-    log.info(f"Sources: {sources}")
+    log.debug(f"Sources: {sources}")
     sources = [source for source in sources if source.get("source", {}).get("name", "")]
-    log.info(f"Sources (filter): {sources}")
+    log.debug(f"Sources (filter): {sources}")
     if len(sources) > 0:
         events.append({"sources": sources})
     # 如果模型关联了知识库 (model_knowledge 为真)。
@@ -1679,7 +1679,6 @@ async def process_chat_response(
                 if message
                 else last_assistant_message if last_assistant_message else ""
             )
-            log.info(f"content: {content}")
             # 这是一个列表，用于结构化地存储响应内容。
             # 每个元素是一个字典，包含 type (如 "text", "tool_calls", "code_interpreter", "reasoning") 和 content。
             # 这对于后续重新构建消息列表至关重要。初始时通常有一个空的 "text" 块。
@@ -1689,7 +1688,6 @@ async def process_chat_response(
                     "content": content,
                 }
             ]
-            log.info(f"content_blocks: {content_blocks}")
             # We might want to disable this by default
             DETECT_REASONING = True
             DETECT_SOLUTION = True

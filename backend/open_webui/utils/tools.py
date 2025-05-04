@@ -605,7 +605,9 @@ async def execute_tool_server(
 
         async with aiohttp.ClientSession() as session:
             request_method = getattr(session, http_method.lower())
-
+            log.info(
+                f"Executing {http_method.upper()} request to {final_url} with headers: {headers} and body: {body_params}"
+            )
             if http_method in ["post", "put", "patch"]:
                 async with request_method(
                     final_url, json=body_params, headers=headers
