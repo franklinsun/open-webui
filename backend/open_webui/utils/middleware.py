@@ -1024,7 +1024,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
 
             except Exception as e:
                 log.exception(e)
-        log.debug(f"function_calling = {metadata.get("function_calling")}, form_data = {form_data}")
+        log.debug(f"function_calling = {metadata.get('function_calling')}, form_data = {form_data}")
     try:
         # 处理 RAG（Retrieval-Augmented Generation）的核心步骤。
         form_data, flags = await chat_completion_files_handler(request, form_data, user)
