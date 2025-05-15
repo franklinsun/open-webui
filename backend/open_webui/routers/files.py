@@ -20,6 +20,8 @@ from fastapi.responses import FileResponse, StreamingResponse
 from open_webui.config import RAG_KNOWLEDGE_URI
 from open_webui.constants import ERROR_MESSAGES
 from open_webui.env import SRC_LOG_LEVELS
+
+from open_webui.models.users import Users
 from open_webui.models.files import (
     FileForm,
     FileModel,
@@ -119,11 +121,13 @@ def upload_file(
     request: Request,
     file: UploadFile = File(...),
     user=Depends(get_verified_user),
-    file_metadata: dict = {},
+    file_metadata: dict = None,
     process: bool = Query(True),
     image_generate=False,
 ):
     log.info(f"file.content_type: {file.content_type}")
+
+    file_metadata = file_metadata if file_metadata else {}
     try:
         file_name = file.filename
         content_type = file.content_type
@@ -149,7 +153,13 @@ def upload_file(
         id = str(uuid.uuid4())
         name = filename
         filename = f"{id}_{filename}"
-        contents, file_path = Storage.upload_file(file.file, filename)
+        tags = {
+            "OpenWebUI-User-Email": user.email,
+            "OpenWebUI-User-Id": user.id,
+            "OpenWebUI-User-Name": user.name,
+            "OpenWebUI-File-Id": id,
+        }
+        contents, file_path = Storage.upload_file(file.file, filename, tags)
 
         file_item = Files.insert_new_file(
             user.id,
@@ -169,12 +179,17 @@ def upload_file(
         )
         if process:
             try:
-                if content_type in [
-                    "audio/mpeg",
-                    "audio/wav",
-                    "audio/ogg",
-                    "audio/x-m4a",
-                ]:
+
+                if content_type.startswith(
+                    (
+                        "audio/mpeg",
+                        "audio/wav",
+                        "audio/ogg",
+                        "audio/x-m4a",
+                        "audio/webm",
+                        "video/webm",
+                    )
+                ):
                     file_path = Storage.get_file(file_path)
                     result = transcribe(request, file_path)
 
@@ -184,8 +199,15 @@ def upload_file(
                         user=user,
                         image_generate=image_generate,
                     )
-                elif content_type not in ["image/png", "image/jpeg", "image/gif"]:
-                    process_file(request, ProcessFileForm(file_id=id, global_collection_name=file_metadata.get("collection_name", "")), user=user, image_generate=image_generate,)
+                elif content_type not in [
+                    "image/png",
+                    "image/jpeg",
+                    "image/gif",
+                    "video/mp4",
+                    "video/ogg",
+                    "video/quicktime",
+                ]:
+                    process_file(request, ProcessFileForm(file_id=id), user=user)
 
                 file_item = Files.get_file_by_id(id=id)
             except Exception as e:
@@ -228,7 +250,8 @@ async def list_files(user=Depends(get_verified_user), content: bool = Query(True
 
     if not content:
         for file in files:
-            del file.data["content"]
+            if "content" in file.data:
+                del file.data["content"]
 
     return files
 
@@ -269,7 +292,8 @@ async def search_files(
 
     if not content:
         for file in matching_files:
-            del file.data["content"]
+            if "content" in file.data:
+                del file.data["content"]
 
     return matching_files
 
@@ -481,6 +505,13 @@ async def get_html_file_content_by_id(id: str, user=Depends(get_verified_user)):
     file = Files.get_file_by_id(id)
 
     if not file:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+    file_user = Users.get_user_by_id(file.user_id)
+    if not file_user.role == "admin":
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=ERROR_MESSAGES.NOT_FOUND,
