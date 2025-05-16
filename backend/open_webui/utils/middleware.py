@@ -194,7 +194,7 @@ async def chat_completion_tools_handler(
     payload = get_tools_function_calling_payload(
         body["messages"], task_model_id, tools_function_calling_prompt
     )
-    log.debug(f"get_tools_function_calling_payload: {payload}")
+    log.debug(f"get_tools_function_calling_payload={payload}")
 
     try:
         # 向指定的 task_model_id 发送请求，让它根据用户查询、聊天历史和提供的工具规格，决定应该调用哪个工具以及使用什么参数。
@@ -240,6 +240,7 @@ async def chat_completion_tools_handler(
                         if k in allowed_params
                     }
                     # 检查 'direct' 标志来区分内部工具和外部工具
+                    log.debug(f"direct: {tool.get('direct')}")
                     if tool.get("direct", False):
                         tool_result = await event_caller(
                             {
@@ -259,6 +260,7 @@ async def chat_completion_tools_handler(
 
                 except Exception as e:
                     tool_result = str(e)
+                log.debug(f"{tool_result=}")
                 # --- 处理工具执行结果 ---
                 tool_result_files = []
                 if isinstance(tool_result, list):
@@ -941,7 +943,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
         # 对于每个工具函数，它会创建一个异步包装器 (callable)，该包装器在调用时会注入 extra_params（如用户信息、请求对象等）。
         # 它还会获取或生成工具函数的规格说明 (spec)。
         # 返回的 tools_dict 包含了这些工具函数的信息，键是函数名。
-        tools_dict = get_tools(
+        tools_dict = await get_tools(
             request,
             tool_ids,
             user,

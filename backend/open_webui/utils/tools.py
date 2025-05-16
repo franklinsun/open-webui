@@ -65,7 +65,7 @@ def get_async_tool_function_and_apply_extra_params(
         return new_function
 
 
-def get_tools(
+async def get_tools(
     request: Request, tool_ids: list[str], user: UserModel, extra_params: dict
 ) -> dict[str, dict]:
     """根据传入的 tool_ids 列表，准备一个包含所有可用工具函数及其相关信息（如可调用包装器、规格说明）的字典。
@@ -160,6 +160,130 @@ def get_tools(
                         log.warning(f"Discarding {tool_id}.{function_name}")
                     else:
                         tools_dict[function_name] = tool_dict
+            elif tool_id.startswith("user-server:"):
+                try:
+                    parts = tool_id.split(":")
+                    if not hasattr(request.app.state, "USER_TOOL_SERVERS_CACHE"):
+                        request.app.state.USER_TOOL_SERVERS_CACHE = {}
+                    if len(parts) != 3:
+                        log.warning(f"Invalid user-server ID format: {tool_id}. Skipping.")
+                        continue
+                    
+                    # tool_owner_id_from_string = parts[1] # This is the user.id from the tool_id string
+                    # We use the 'user' object (current authenticated user) passed to get_tools
+                    # to access their settings. This assumes tool_ids are for the current user.
+                    
+                    original_idx = int(parts[2])
+
+                    if not (user.settings and user.settings.ui and user.settings.ui.get('toolServers')):
+                        log.warning(f"User {user.id} has no tool server configurations for tool_id {tool_id}. Skipping.")
+                        continue
+
+                    user_tool_connections = user.settings.ui['toolServers']
+                    if not (0 <= original_idx < len(user_tool_connections)):
+                        log.warning(f"Index {original_idx} out of bounds for user {user.id}'s tool servers (tool_id: {tool_id}). Skipping.")
+                        continue
+
+                    conn_data = user_tool_connections[original_idx]
+                    conn_data_dict = conn_data.model_dump() if hasattr(conn_data, 'model_dump') else dict(conn_data)
+
+                    user_cached_servers = request.app.state.USER_TOOL_SERVERS_CACHE.get(user.id, [])
+                    user_tool_server_data = None
+
+                    if original_idx < len(user_cached_servers) and user_cached_servers[original_idx] is not None:
+                        cached_server = user_cached_servers[original_idx]
+                        # Validate cache: compare current config with cached original_config
+                        if cached_server.get("original_config") == conn_data_dict:
+                            user_tool_server_data = cached_server
+                            log.debug(f"Using cached data for user tool {tool_id}")
+                        else:
+                            log.debug(f"Cache invalidated for user tool {tool_id} due to config change.")
+                            # Mark as stale, will be re-fetched
+                            user_cached_servers[original_idx] = None 
+
+                    if user_tool_server_data is None:
+                        log.debug(f"Fetching data for user tool {tool_id}")
+                        # Prepare the connection object for get_tool_servers_data
+                        single_connection_config_list = [{
+                            "url": conn_data_dict.get('url', ''),
+                            "path": conn_data_dict.get('path', 'openapi.json'),
+                            "auth_type": conn_data_dict.get('auth_type'),
+                            "key": conn_data_dict.get('key'),
+                            "config": {**conn_data_dict.get('config', {}), "enable": True} # User tools are implicitly enabled
+                        }]
+                        
+                        effective_session_token = None
+                        if conn_data_dict.get('auth_type') == "session":
+                            if hasattr(request.state, 'token') and request.state.token and hasattr(request.state.token, 'credentials'):
+                                effective_session_token = request.state.token.credentials
+                        
+                        processed_servers_list = await get_tool_servers_data(
+                            single_connection_config_list, 
+                            session_token=effective_session_token
+                        )                            
+
+                        if processed_servers_list:
+                            user_tool_server_data = processed_servers_list[0]
+                            user_tool_server_data["original_config"] = conn_data_dict # Store for cache validation
+
+                            # Update cache
+                            if user.id not in request.app.state.USER_TOOL_SERVERS_CACHE:
+                                request.app.state.USER_TOOL_SERVERS_CACHE[user.id] = []
+                            
+                            user_cache_list = request.app.state.USER_TOOL_SERVERS_CACHE[user.id]
+                            while len(user_cache_list) <= original_idx:
+                                user_cache_list.append(None)
+                            user_cache_list[original_idx] = user_tool_server_data
+                        else:
+                            log.warning(f"Failed to process user tool server data for {tool_id} (URL: {conn_data_dict.get('url')}). Skipping.")
+                            continue
+                    
+                    specs = user_tool_server_data.get("specs", [])
+                    
+                    for spec_item in specs:
+                        function_name = spec_item["name"]
+                        
+                        auth_type = conn_data_dict.get('auth_type', 'bearer')
+                        exec_token = None
+                        if auth_type == "bearer" and conn_data_dict.get('key'):
+                            exec_token = conn_data_dict.get('key', "")
+                        elif auth_type == "session":
+                            if hasattr(request.state, 'token') and request.state.token and hasattr(request.state.token, 'credentials'):
+                                exec_token = request.state.token.credentials
+
+                        def make_user_tool_function(fn_name, tkn, server_data_for_exec):
+                            async def tool_function(**kwargs):
+                                log.debug(
+                                    f"Executing user-defined tool function {fn_name} from {server_data_for_exec['url']} with params: {kwargs}"
+                                )
+                                return await execute_tool_server(
+                                    token=tkn,
+                                    url=server_data_for_exec["url"], 
+                                    name=fn_name,
+                                    params=kwargs,
+                                    server_data=server_data_for_exec,
+                                )
+                            return tool_function
+
+                        callable_func = make_user_tool_function(function_name, exec_token, user_tool_server_data)
+                        callable_wrapper = get_async_tool_function_and_apply_extra_params(callable_func, {})
+
+                        tool_dict_entry = {
+                            "tool_id": tool_id, 
+                            "callable": callable_wrapper,
+                            "spec": spec_item,
+                            "server": { "url": user_tool_server_data["url"], "auth_type": auth_type, "key": conn_data_dict.get('key') }
+                        }
+
+                        if function_name in tools_dict:
+                            log.warning(
+                                f"Tool {function_name} from user server {tool_id} collides with an existing tool. Discarding."
+                            )
+                        else:
+                            tools_dict[function_name] = tool_dict_entry
+                except Exception as e:
+                    log.error(f"Error processing user-server tool ID {tool_id}: {e}")
+                    continue
             else:
                 continue
         else:
@@ -542,7 +666,6 @@ async def get_tool_servers_data(
         if isinstance(response, Exception):
             print(f"Failed to connect to {url} OpenAPI tool server")
             continue
-
         results.append(
             {
                 "idx": idx,

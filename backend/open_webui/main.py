@@ -540,6 +540,8 @@ app.state.OPENAI_MODELS = {}
 
 app.state.config.TOOL_SERVER_CONNECTIONS = TOOL_SERVER_CONNECTIONS
 app.state.TOOL_SERVERS = []
+app.state.USER_TOOL_SERVERS_CACHE = {}
+
 
 ########################################
 #

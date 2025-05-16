@@ -16,7 +16,8 @@ from open_webui.constants import ERROR_MESSAGES
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from open_webui.utils.tools import get_tool_specs
+from open_webui.models.users import UserModel # Import UserModel from models.users
+from open_webui.utils.tools import get_tool_specs 
 from open_webui.utils.auth import get_admin_user, get_verified_user
 from open_webui.utils.access_control import has_access, has_permission
 from open_webui.env import SRC_LOG_LEVELS
@@ -36,7 +37,6 @@ router = APIRouter()
 
 @router.get("/", response_model=list[ToolUserResponse])
 async def get_tools(request: Request, user=Depends(get_verified_user)):
-
     if not request.app.state.TOOL_SERVERS:
         # If the tool servers are not set, we need to set them
         # This is done only once when the server starts
@@ -71,6 +71,31 @@ async def get_tools(request: Request, user=Depends(get_verified_user)):
                 }
             )
         )
+
+    # Add user-defined external tool servers
+    if user.settings and user.settings.ui and user.settings.ui["toolServers"]:
+        user_tool_server_connections = user.settings.ui['toolServers']
+        try:
+            processed_servers_list = await get_tool_servers_data(user_tool_server_connections)
+            if processed_servers_list:
+                for server in processed_servers_list:
+                    tools.append(
+                        ToolUserResponse(
+                            id=f"user-server:{user.id}:{server["idx"]}",
+                            user_id=user.id, 
+                            name=server["openapi"].get("info", {}).get("title", f"User Tool Server {server["idx"]+1}"),
+                            meta={
+                                "description": server["openapi"].get("info", {}).get("description", ""),
+                                "url": server.get('url'),
+                                "path": server.get('path'),
+                            },
+                            access_control=None, 
+                            updated_at=int(time.time()),
+                            created_at=int(time.time()),
+                        )
+                    )
+        except Exception as e:
+            log.error(f"Error processing user tool server for user {user.id}: {e}")
 
     if user.role != "admin":
         tools = [
@@ -121,14 +146,24 @@ async def refresh_tool_servers(
         # 更新应用状态中的服务器信息
         request.app.state.TOOL_SERVERS = refreshed_servers
 
-        count = len(refreshed_servers)
-        log.info(f"Successfully refreshed tool servers. Found {count} active servers.")
+        admin_servers_count = len(refreshed_servers)
+        log.info(f"Successfully refreshed admin-configured tool servers. Found {admin_servers_count} active servers.")
+
+        # 清除用户自定义工具服务器的缓存
+        user_cache_cleared_count = 0
+        if hasattr(request.app.state, "USER_TOOL_SERVERS_CACHE"):
+            user_cache_cleared_count = len(request.app.state.USER_TOOL_SERVERS_CACHE)
+            request.app.state.USER_TOOL_SERVERS_CACHE.clear()
+            log.info(f"Cleared USER_TOOL_SERVERS_CACHE for {user_cache_cleared_count} users. User-specific tool lists will be re-fetched on next access.")
+        else:
+            log.info("USER_TOOL_SERVERS_CACHE not found or already empty.")
+
 
         # 返回成功响应
         return RefreshResponse(
             status=True,
-            message=f"Successfully refreshed tool servers. Found {count} active servers.",
-            refreshed_servers_count=count
+            message=f"Successfully refreshed admin-configured tool servers ({admin_servers_count} active). User tool server caches (for {user_cache_cleared_count} users) also cleared.",
+            refreshed_servers_count=admin_servers_count
         )
     except Exception as e:
         log.exception(f"Failed to refresh tool servers: {e}")
@@ -146,76 +181,168 @@ async def refresh_tool_servers(
 async def get_tool_server_specs_by_id(
     server_id: str,
     request: Request,
-    user=Depends(get_verified_user) # 允许认证用户访问，如果需要更严格，可改为 get_admin_user
+    user: UserModel = Depends(get_verified_user) 
 ):
     """
     获取指定外部工具服务器 (通过 server:<idx> ID) 提供的所有 API 方法规格。
     这些规格是从服务器的 OpenAPI 定义中处理得到的。
     """
     log.info(f"User {user.id} attempting to fetch specs for tool server ID: {server_id}")
-
+    
     # 1. 验证 server_id 格式
-    if not server_id.startswith("server:"):
+    if not server_id.startswith("server:") and not server_id.startswith("user-server:"):
         log.warning(f"Invalid server ID format received: {server_id}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid server ID format. Expected 'server:<index>'.",
+            detail="Invalid server ID format. Expected 'server:<index>' or 'user-server:<user_id>:<index>'.",
         )
+    
+    if server_id.startswith("server:"):
+        # Logic for admin-configured tool servers
+        try:
+            server_idx = int(server_id.split(":")[1])
+        except (IndexError, ValueError):
+            log.warning(f"Could not parse index from server ID: {server_id}")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid server ID format. Index could not be parsed.",
+            )
 
-    # 2. 解析索引
-    try:
-        server_idx = int(server_id.split(":")[1])
-    except (IndexError, ValueError):
-        log.warning(f"Could not parse index from server ID: {server_id}")
+        if not request.app.state.TOOL_SERVERS:
+            log.info("TOOL_SERVERS is empty, attempting to populate.")
+            try:
+                connections = request.app.state.config.TOOL_SERVER_CONNECTIONS
+                session_token = None
+                if hasattr(request.state, 'token') and request.state.token and hasattr(request.state.token, 'credentials'):
+                    session_token = request.state.token.credentials
+                request.app.state.TOOL_SERVERS = await get_tool_servers_data(
+                    connections, session_token=session_token
+                )
+                log.info(f"Populated TOOL_SERVERS with {len(request.app.state.TOOL_SERVERS)} entries.")
+            except Exception as e:
+                log.error(f"Failed to populate TOOL_SERVERS during request: {e}")
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Failed to load tool server configurations."
+                )
+
+        tool_server_data = None
+        for server_in_state in request.app.state.TOOL_SERVERS:
+            if server_in_state.get("idx") == server_idx:
+                tool_server_data = server_in_state
+                break
+
+        if tool_server_data is None:
+            log.warning(f"Tool server with index {server_idx} not found in loaded servers.")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Tool server with index {server_idx} not found or is disabled.",
+            )
+
+        specs = tool_server_data.get("specs", [])
+        log.info(f"Found {len(specs)} specs for admin tool server ID: {server_id}")
+        return JSONResponse(content=specs)
+
+    elif server_id.startswith("user-server:"):
+        # Logic for user-configured tool servers
+        log.info(f"Fetching specs for user-defined tool server ID: {server_id}")
+        try:
+            parts = server_id.split(":")
+            if len(parts) != 3:
+                raise ValueError("Invalid user-server ID format. Expected 'user-server:<user_id>:<index>'")
+            
+            # The user_id in the tool_id string should match the authenticated user's ID
+            tool_owner_id = parts[1]
+            original_idx = int(parts[2])
+
+            if user.id != tool_owner_id:
+                log.warning(f"User {user.id} attempting to access tool server specs of user {tool_owner_id}. Forbidden.")
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="You are not authorized to access specs for this tool server."
+                )
+
+            if not (user.settings and user.settings.ui and user.settings.ui["toolServers"]):
+                log.warning(f"User {user.id} has no tool server configurations.")
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="User has no configured tool servers."
+                )
+
+            user_tool_server_connections = user.settings.ui["toolServers"]
+            if not (0 <= original_idx < len(user_tool_server_connections)):
+                log.warning(f"Index {original_idx} out of bounds for user {user.id}'s tool servers (count: {len(user_tool_connections)}).")
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Tool server definition at index {original_idx} not found for this user."
+                )
+            
+            conn_data = user_tool_server_connections[original_idx]
+            conn_data_dict = conn_data.model_dump(exclude_none=True) if hasattr(conn_data, 'model_dump') else dict(conn_data)
+
+            user_cached_servers = request.app.state.USER_TOOL_SERVERS_CACHE.get(user.id, [])
+            server_data = None
+
+            if original_idx < len(user_cached_servers) and user_cached_servers[original_idx] is not None:
+                cached_server = user_cached_servers[original_idx]
+                if cached_server.get("original_config") == conn_data_dict:
+                    server_data = cached_server
+                    log.debug(f"Using cached specs for user tool server ID: {server_id}")
+
+            if server_data is None:
+                log.debug(f"Fetching specs for user tool server ID: {server_id}")
+                single_connection_config_list = [{
+                    "url": conn_data_dict.get('url', ''),
+                    "path": conn_data_dict.get('path', 'openapi.json'),
+                    "auth_type": conn_data_dict.get('auth_type'),
+                    "key": conn_data_dict.get('key'),
+                    "config": {**conn_data_dict.get('config', {}), "enable": True}
+                }]
+                effective_session_token = None
+                if conn_data_dict.get('auth_type') == "session":
+                    if hasattr(request.state, 'token') and request.state.token and hasattr(request.state.token, 'credentials'):
+                        effective_session_token = request.state.token.credentials
+                
+                processed_servers_list = await get_tool_servers_data(
+                    single_connection_config_list, session_token=effective_session_token
+                )
+                if processed_servers_list:
+                    server_data = processed_servers_list[0]
+                    server_data["original_config"] = conn_data_dict # Store for cache validation
+                    # Update cache
+                    if user.id not in request.app.state.USER_TOOL_SERVERS_CACHE:
+                        request.app.state.USER_TOOL_SERVERS_CACHE[user.id] = []
+                    user_cache_list = request.app.state.USER_TOOL_SERVERS_CACHE[user.id]
+                    while len(user_cache_list) <= original_idx:
+                        user_cache_list.append(None)
+                    user_cache_list[original_idx] = server_data
+
+            if server_data and "specs" in server_data:
+                log.info(f"Found {len(server_data['specs'])} specs for user tool server ID: {server_id}")
+                return JSONResponse(content=server_data["specs"])
+            else:
+                log.warning(f"No specs found or error fetching for user tool server ID: {server_id}")
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Could not retrieve specs for user tool server at index {original_idx}.")
+
+        except ValueError as e:
+            log.warning(f"Invalid user-server ID format or index: {server_id}. Error: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid user-server ID format: {e}",
+            )
+        except Exception as e:
+            log.error(f"Error fetching specs for user tool server {server_id}: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Error retrieving specs for user tool server: {str(e)}",
+            )
+    else:
+        # Fallback for unrecognized ID format
+        log.warning(f"Unrecognized server ID format: {server_id}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid server ID format. Index could not be parsed.",
+            detail="Invalid server ID format.",
         )
-
-    # 3. 确保 TOOL_SERVERS 已加载 (懒加载处理)
-    # 如果 TOOL_SERVERS 为空（例如服务器刚启动），尝试加载一次
-    if not request.app.state.TOOL_SERVERS:
-         log.info("TOOL_SERVERS is empty, attempting to populate.")
-         try:
-             connections = request.app.state.config.TOOL_SERVER_CONNECTIONS
-             session_token = None
-             # 安全地获取 session_token
-             if hasattr(request.state, 'token') and request.state.token and hasattr(request.state.token, 'credentials'):
-                 session_token = request.state.token.credentials
-             request.app.state.TOOL_SERVERS = await get_tool_servers_data(
-                 connections, session_token=session_token
-             )
-             log.info(f"Populated TOOL_SERVERS with {len(request.app.state.TOOL_SERVERS)} entries.")
-         except Exception as e:
-             log.error(f"Failed to populate TOOL_SERVERS during request: {e}")
-             # 根据需要决定是返回 500 错误还是允许继续尝试查找（可能返回 404）
-             raise HTTPException(
-                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                 detail="Failed to load tool server configurations."
-             )
-
-    # 4. 在内存中查找对应的服务器数据
-    tool_server_data = None
-    for server in request.app.state.TOOL_SERVERS:
-        # server 字典中应该包含 'idx' 键
-        if server.get("idx") == server_idx:
-            tool_server_data = server
-            break
-
-    # 5. 处理未找到的情况
-    if tool_server_data is None:
-        log.warning(f"Tool server with index {server_idx} not found in loaded servers.")
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Tool server with index {server_idx} not found or is disabled.",
-        )
-
-    # 6. 提取并返回处理后的 specs 列表
-    specs = tool_server_data.get("specs", [])
-    log.info(f"Found {len(specs)} specs for tool server ID: {server_id}")
-
-    # 使用 JSONResponse 直接返回列表
-    return JSONResponse(content=specs)
 
 ############################
 # GetToolList

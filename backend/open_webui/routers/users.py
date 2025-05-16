@@ -222,6 +222,11 @@ async def update_user_settings_by_session_user(
 
     user = Users.update_user_settings_by_id(user.id, updated_user_settings)
     if user:
+        # Invalidate user's tool server cache if it exists and settings were updated
+        if hasattr(request.app.state, "USER_TOOL_SERVERS_CACHE") and user.id in request.app.state.USER_TOOL_SERVERS_CACHE:
+            del request.app.state.USER_TOOL_SERVERS_CACHE[user.id]
+            log.info(f"Invalidated tool server cache for user {user.id} due to settings update.")
+
         return user.settings
     else:
         raise HTTPException(
