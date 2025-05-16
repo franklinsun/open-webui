@@ -486,6 +486,23 @@
 								</button>
 							</div>
 						{/if}
+
+						<!-- 中国备案及版权信息 -->
+						<div class="mt-10 pt-4 border-t border-gray-200 dark:border-gray-700 text-center text-xs text-gray-500 dark:text-gray-400 space-y-1">
+							<p>
+								<a href="https://beian.miit.gov.cn/" target="_blank" rel="noopener noreferrer" class="hover:underline">
+									苏ICP备2025174783号-1
+								</a>
+							</p>
+							<p>
+								<a href="http://www.beian.gov.cn/portal/registerSystemInfo?recordcode=32031102020182" target="_blank" rel="noopener noreferrer" class="hover:underline">
+									<img src="{WEBUI_BASE_URL}/static/gongan_beian_icon.png" alt="公安备案图标" class="inline-block h-4 w-4 mr-1 align-middle">
+									苏公网安备32031102020182号
+								</a>
+							</p>
+							<p>技术支持：<a href="https://qpolarity.com/" target="_blank" rel="noopener noreferrer" class="hover:underline">QP-Bot</a></p>
+							<p>Copyright © {new Date().getFullYear()} <a href="https://qpolarity.com/" target="_blank" rel="noopener noreferrer" class="hover:underline">徐州量极科技有限公司.</a> All Rights Reserved.</p>
+						</div>
 					</div>
 				{/if}
 			</div>
